@@ -3,6 +3,31 @@ const router         = express.Router();
 const pool           = require('../config/database');
 const authMiddleware = require('../middleware/authMiddleware');
 
+
+// Add this helper function at the top of quiz.js
+async function checkAndNotifyStreak(userId, pool) {
+  const result = await pool.query(
+    'SELECT current_streak FROM streaks WHERE user_id = $1',
+    [userId]
+  );
+
+  if (result.rows.length === 0) return;
+
+  const streak = result.rows[0].current_streak;
+  const milestones = [3, 7, 14, 30, 60, 100];
+
+  if (milestones.includes(streak)) {
+    await pool.query(
+      `INSERT INTO notifications (user_id, title, message, type)
+       VALUES ($1, $2, $3, 'streak')`,
+      [
+        userId,
+        `🔥 ${streak}-day streak!`,
+        `Incredible! You have studied ${streak} days in a row. Ka yi kyau sosai!`,
+      ]
+    );
+  }
+}
 // Save a completed quiz attempt (protected)
 router.post('/attempt', authMiddleware, async (req, res) => {
   const { subject_id, topic_id, score, total, time_taken, answers } = req.body;

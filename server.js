@@ -8,6 +8,12 @@ const subjectRoutes  = require('./src/routes/subjects');
 const questionRoutes = require('./src/routes/questions');
 const quizRoutes     = require('./src/routes/quiz');
 const adminRoutes    = require('./src/routes/admin');
+const pastExamRoutes = require('./src/routes/pastExam');
+const leaderboardRoutes   = require('./src/routes/leaderboard');
+const notificationRoutes =  require('./src/routes/notification');
+const bookmarkRoutes = require('./src/routes/bookmarks');
+const helmet     = require('helmet');
+
 
 const app  = express();
 const PORT = process.env.PORT || 5000;
@@ -41,6 +47,23 @@ app.use('/api/auth',      authRoutes);
 app.use('/api/subjects',  subjectRoutes);
 app.use('/api/questions', questionRoutes);
 app.use('/api/quiz',      quizRoutes);
+app.use('/api/past-exams', pastExamRoutes);
+app.use('/api/leaderboard', leaderboardRoutes);
+app.use('/api/notifications', notificationRoutes);
+app.use('/api/bookmarks', bookmarkRoutes);
+app.use('/api/auth/login',    authLimiter);
+app.use('/api/auth/register', authLimiter);
+
+// Security headers
+app.use(helmet());
+
+// Global rate limit — 100 requests per 15 minutes
+const globalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max:      100,
+  message:  { error: 'Too many requests. Please slow down.' },
+});
+app.use(globalLimiter);
 
 // ── Error handlers ───────────────────────────────────
 app.use((_req, res) => {

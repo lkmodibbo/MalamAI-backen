@@ -306,6 +306,134 @@ async function forgotPassword(req, res) {
   }
 }
 
+async function resetPasswordPage(req, res) {
+  const { token } = req.query;
+
+  if (!token) {
+    return res.status(400).send(errorPage('Missing reset token. Please request a new password reset link.'));
+  }
+
+  // Check token is valid before showing the form
+  try {
+    const result = await pool.query(
+      `SELECT id FROM users WHERE verify_token = $1 AND verify_token_expires > NOW()`,
+      [token]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(400).send(errorPage('This reset link is invalid or has expired. Please request a new one.'));
+    }
+  } catch (err) {
+    console.error('[resetPasswordPage]', err);
+    return res.status(500).send(errorPage('Something went wrong. Please try again.'));
+  }
+
+  const BASE = process.env.APP_BASE_URL || 'http://localhost:5000';
+
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>CrackJAMB — Reset Password</title>
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: Arial, sans-serif; background: #f4f6fb;
+               display: flex; justify-content: center; align-items: center;
+               min-height: 100vh; padding: 16px; }
+        .card { background: #fff; border-radius: 16px; padding: 36px 28px;
+                max-width: 420px; width: 100%;
+                box-shadow: 0 4px 24px rgba(0,0,0,0.08); }
+        .logo { text-align: center; font-size: 48px; margin-bottom: 12px; }
+        h1 { color: #1b2a4a; text-align: center; font-size: 22px; margin-bottom: 6px; }
+        p  { color: #6b7c9a; text-align: center; font-size: 14px; margin-bottom: 24px; }
+        label { display: block; font-size: 13px; font-weight: 700;
+                color: #1b2a4a; margin-bottom: 6px; }
+        input { width: 100%; padding: 13px 16px; border: 1.5px solid #dde3ef;
+                border-radius: 10px; font-size: 15px; color: #1b2a4a;
+                background: #f4f6fb; margin-bottom: 14px; outline: none; }
+        input:focus { border-color: #1b2a4a; }
+        button { width: 100%; padding: 14px; background: #1b2a4a; color: #fff;
+                 border: none; border-radius: 10px; font-size: 15px;
+                 font-weight: 800; cursor: pointer; margin-top: 4px; }
+        button:hover { background: #2e4a7a; }
+        .error { color: #c0392b; font-size: 13px; margin-top: -8px;
+                 margin-bottom: 10px; display: none; }
+        .success { background: #eafaf1; border: 1px solid #27ae60; border-radius: 10px;
+                   padding: 14px; color: #1e8449; font-size: 14px; text-align: center;
+                   display: none; margin-top: 16px; }
+      </style>
+    </head>
+    <body>
+      <div class="card">
+        <div class="logo">🎓</div>
+        <h1>Reset your password</h1>
+        <p>Enter a new password for your CrackJAMB account.</p>
+        <form id="resetForm">
+          <label>New password</label>
+          <input type="password" id="password" placeholder="Min. 6 characters" required minlength="6" />
+          <label>Confirm new password</label>
+          <input type="password" id="confirmPassword" placeholder="Re-enter new password" required />
+          <div class="error" id="errorMsg"></div>
+          <button type="submit" id="submitBtn">Reset Password</button>
+        </form>
+        <div class="success" id="successMsg">
+          ✓ Password reset! You can now open the CrackJAMB app and login.
+        </div>
+      </div>
+      <script>
+        document.getElementById('resetForm').addEventListener('submit', async (e) => {
+          e.preventDefault();
+          const password        = document.getElementById('password').value;
+          const confirmPassword = document.getElementById('confirmPassword').value;
+          const errorMsg        = document.getElementById('errorMsg');
+          const successMsg      = document.getElementById('successMsg');
+          const submitBtn       = document.getElementById('submitBtn');
+          errorMsg.style.display = 'none';
+
+          if (password !== confirmPassword) {
+            errorMsg.textContent   = 'Passwords do not match.';
+            errorMsg.style.display = 'block';
+            return;
+          }
+          if (password.length < 6) {
+            errorMsg.textContent   = 'Password must be at least 6 characters.';
+            errorMsg.style.display = 'block';
+            return;
+          }
+
+          submitBtn.textContent = 'Resetting…';
+          submitBtn.disabled    = true;
+
+          try {
+            const res = await fetch('${BASE}/api/auth/reset-password', {
+              method:  'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body:    JSON.stringify({ token: '${token}', password }),
+            });
+            const data = await res.json();
+            if (!res.ok) {
+              errorMsg.textContent   = data.error || 'Reset failed. Please try again.';
+              errorMsg.style.display = 'block';
+              submitBtn.textContent  = 'Reset Password';
+              submitBtn.disabled     = false;
+            } else {
+              document.getElementById('resetForm').style.display = 'none';
+              successMsg.style.display = 'block';
+            }
+          } catch (err) {
+            errorMsg.textContent   = 'Network error. Please check your connection.';
+            errorMsg.style.display = 'block';
+            submitBtn.textContent  = 'Reset Password';
+            submitBtn.disabled     = false;
+          }
+        });
+      </script>
+    </body>
+    </html>
+  `);
+}
+
 async function resetPassword(req, res) {
   const { token, password } = req.body;
 
@@ -338,7 +466,7 @@ async function resetPassword(req, res) {
     );
 
     res.json({ message: 'Password reset successful. You can now login.' });
-    } catch (err) {
+  } catch (err) {
     console.error('[resetPassword]', err);
     res.status(500).json({ error: 'Could not reset password.' });
   }
@@ -416,4 +544,4 @@ function errorPage(message) {
   `;
 }
 
-module.exports = { register, verifyEmail, resendVerification, login, getMe, forgotPassword, resetPassword };
+module.exports = { register, verifyEmail, resendVerification, login, getMe, forgotPassword, resetPassword, resetPasswordPage };

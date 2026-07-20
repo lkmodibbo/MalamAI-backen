@@ -305,4 +305,145 @@ router.get('/questions', adminOnly, async (req, res) => {
   }
 });
 
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// BULK UPLOAD PAST QUESTIONS
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+router.post('/past-questions/bulk', adminOnly, async (req, res) => {
+  const { questions } = req.body;
+
+  if (!Array.isArray(questions) || questions.length === 0) {
+    return res.status(400).json({ error: 'questions array is required.' });
+  }
+
+  const added  = [];
+  const errors = [];
+
+  for (const [i, q] of questions.entries()) {
+    if (!q.subject_id || !q.year || !q.question ||
+        !q.option_a || !q.option_b || !q.option_c || !q.option_d || !q.answer) {
+      errors.push({ index: i, error: 'Missing required fields' });
+      continue;
+    }
+    try {
+      const result = await pool.query(
+        `INSERT INTO past_questions
+           (subject_id, year, question, option_a, option_b, option_c, option_d, answer, explanation)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+         RETURNING id`,
+        [q.subject_id, parseInt(q.year), q.question,
+         q.option_a, q.option_b, q.option_c, q.option_d,
+         q.answer.toUpperCase(), q.explanation || null]
+      );
+      added.push(result.rows[0].id);
+    } catch (err) {
+      errors.push({ index: i, error: err.message });
+    }
+  }
+
+  res.status(201).json({
+    message: `${added.length} past questions added. ${errors.length} failed.`,
+    added_count: added.length,
+    errors,
+  });
+});
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// GET PAST QUESTIONS OVERVIEW (admin)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+router.get('/past-questions/overview', adminOnly, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT subject_id, year, COUNT(*) AS count
+       FROM past_questions
+       GROUP BY subject_id, year
+       ORDER BY subject_id, year DESC`
+    );
+    res.json({ overview: result.rows });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not fetch overview.' });
+  }
+});
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ADMIN DASHBOARD STATS
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+router.get('/dashboard', adminOnly, async (req, res) => {
+  try {
+    const [users, questions, attempts, pastQ] = await Promise.all([
+      pool.query('SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE is_verified) AS verified FROM users'),
+      pool.query('SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE is_ai) AS ai_generated FROM questions'),
+      pool.query('SELECT COUNT(*) AS total, ROUND(AVG(score::decimal/total*100),1) AS avg_score FROM quiz_attempts'),
+      pool.query('SELECT COUNT(*) AS total FROM past_questions'),
+    ]);
+
+    res.json({
+      users: {
+        total:    parseInt(users.rows[0].total),
+        verified: parseInt(users.rows[0].verified),
+      },
+      questions: {
+        total:        parseInt(questions.rows[0].total),
+        ai_generated: parseInt(questions.rows[0].ai_generated),
+        past_jamb:    parseInt(pastQ.rows[0].total),
+      },
+      quiz_attempts: {
+        total:         parseInt(attempts.rows[0].total),
+        average_score: parseFloat(attempts.rows[0].avg_score),
+      },
+    });
+  } catch (err) {
+    console.error('[admin dashboard]', err);
+    res.status(500).json({ error: 'Could not fetch dashboard stats.' });
+  }
+});
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// GET ALL USERS
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+router.get('/users', adminOnly, async (req, res) => {
+  const { page = 1, limit = 20 } = req.query;
+  const offset = (page - 1) * limit;
+  try {
+    const result = await pool.query(
+      `SELECT
+         u.id, u.name, u.email, u.is_verified, u.created_at,
+         COUNT(qa.id) AS quiz_count
+       FROM users u
+       LEFT JOIN quiz_attempts qa ON qa.user_id = u.id
+       GROUP BY u.id
+       ORDER BY u.created_at DESC
+       LIMIT $1 OFFSET $2`,
+      [limit, offset]
+    );
+    res.json({ users: result.rows, page: Number(page) });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not fetch users.' });
+  }
+});
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// SEND NOTIFICATION TO ALL USERS
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+router.post('/notify-all', adminOnly, async (req, res) => {
+  const { title, message, type = 'info' } = req.body;
+  if (!title || !message) {
+    return res.status(400).json({ error: 'title and message are required.' });
+  }
+  try {
+    const users = await pool.query(
+      'SELECT id FROM users WHERE is_verified = TRUE'
+    );
+    for (const user of users.rows) {
+      await pool.query(
+        `INSERT INTO notifications (user_id, title, message, type)
+         VALUES ($1, $2, $3, $4)`,
+        [user.id, title, message, type]
+      );
+    }
+    res.json({ message: `Notification sent to ${users.rows.length} users.` });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not send notifications.' });
+  }
+});
+
 module.exports = router;

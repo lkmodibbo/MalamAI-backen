@@ -11,11 +11,12 @@ router.get('/global', async (req, res) => {
         u.id,
         u.name,
         COUNT(qa.id)                                        AS total_quizzes,
-        ROUND(AVG(qa.score::decimal / qa.total * 100), 1)  AS average_score,
+        ROUND(AVG(qa.score::decimal / NULLIF(qa.total, 0) * 100), 1)  AS average_score,
         SUM(qa.score)                                       AS total_correct
       FROM quiz_attempts qa
       JOIN users u ON qa.user_id = u.id
-      WHERE u.is_verified = TRUE
+      WHERE u.is_verified = TRUE AND qa.total > 0
+        AND COALESCE(u.is_admin, FALSE) = FALSE
       GROUP BY u.id, u.name
       HAVING COUNT(qa.id) >= 3
       ORDER BY average_score DESC
@@ -37,11 +38,12 @@ router.get('/subject/:subjectId', async (req, res) => {
         u.id,
         u.name,
         COUNT(qa.id)                                        AS attempts,
-        ROUND(AVG(qa.score::decimal / qa.total * 100), 1)  AS average_score,
-        MAX(ROUND(qa.score::decimal / qa.total * 100))      AS best_score
+        ROUND(AVG(qa.score::decimal / NULLIF(qa.total, 0) * 100), 1)  AS average_score,
+        MAX(ROUND(qa.score::decimal / NULLIF(qa.total, 0) * 100))      AS best_score
       FROM quiz_attempts qa
       JOIN users u ON qa.user_id = u.id
-      WHERE qa.subject_id = $1 AND u.is_verified = TRUE
+      WHERE qa.subject_id = $1 AND u.is_verified = TRUE AND qa.total > 0
+        AND COALESCE(u.is_admin, FALSE) = FALSE
       GROUP BY u.id, u.name
       HAVING COUNT(qa.id) >= 2
       ORDER BY average_score DESC
@@ -63,13 +65,14 @@ router.get('/my-rank', authMiddleware, async (req, res) => {
         SELECT
           u.id,
           u.name,
-          ROUND(AVG(qa.score::decimal / qa.total * 100), 1) AS average_score,
+          ROUND(AVG(qa.score::decimal / NULLIF(qa.total, 0) * 100), 1) AS average_score,
           RANK() OVER (
-            ORDER BY AVG(qa.score::decimal / qa.total * 100) DESC
+            ORDER BY AVG(qa.score::decimal / NULLIF(qa.total, 0) * 100) DESC
           ) AS rank
         FROM quiz_attempts qa
         JOIN users u ON qa.user_id = u.id
-        WHERE u.is_verified = TRUE
+        WHERE u.is_verified = TRUE AND qa.total > 0
+        AND COALESCE(u.is_admin, FALSE) = FALSE
         GROUP BY u.id, u.name
         HAVING COUNT(qa.id) >= 3
       )

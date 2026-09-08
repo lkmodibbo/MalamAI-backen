@@ -2,7 +2,7 @@ const bcrypt      = require('bcryptjs');
 const jwt         = require('jsonwebtoken');
 const crypto      = require('crypto');
 const pool        = require('../config/database');
-const { sendVerificationEmail, sendWelcomeEmail } = require('../utils/emailService');
+const { sendVerificationEmail, sendWelcomeEmail } = require('../services/emailService');
 
 // REGISTER
 async function register(req, res) {
@@ -54,7 +54,7 @@ async function register(req, res) {
 
     // Create streak record
     await pool.query(
-      'INSERT INTO streaks (user_id) VALUES ($1)',
+      'INSERT INTO streaks (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING',
       [user.id]
     );
 
@@ -123,8 +123,17 @@ async function verifyEmail(req, res) {
       [user.id]
     );
 
-    // Send welcome email
     await sendWelcomeEmail(user.email, user.name);
+
+    await pool.query(
+      `INSERT INTO notifications (user_id, title, message, type)
+       VALUES ($1, $2, $3, 'welcome')`,
+      [
+        user.id,
+        'Welcome to CrackJAMB',
+        `Nagode ${user.name}! Your account is verified. Start with a topic, then try a quiz.`,
+      ]
+    );
 
     // Return success HTML page
     res.send(successPage(user.name, 'verified'));
@@ -227,19 +236,21 @@ async function login(req, res) {
     }
 
     // Generate token
+    const isAdmin = Boolean(user.is_admin);
     const token = jwt.sign(
-      { id: user.id, email: user.email },
+      { id: user.id, email: user.email, is_admin: isAdmin },
       process.env.JWT_SECRET,
       { expiresIn: process.env.JWT_EXPIRES_IN }
     );
 
     res.json({
-      message: 'Login successful. Ka yi kyau!',
+      message: isAdmin ? 'Admin login successful.' : 'Login successful. Ka yi kyau!',
       token,
       user: {
-        id:    user.id,
-        name:  user.name,
+        id: user.id,
+        name: user.name,
         email: user.email,
+        is_admin: isAdmin,
       },
     });
 
@@ -253,7 +264,9 @@ async function login(req, res) {
 async function getMe(req, res) {
   try {
     const result = await pool.query(
-      'SELECT id, name, email, is_verified, created_at FROM users WHERE id = $1',
+      `SELECT id, name, email, is_verified, created_at,
+              exam_date, selected_subjects, avatar_uri, onboarding_complete, is_admin
+       FROM users WHERE id = $1`,
       [req.user.id]
     );
 
@@ -261,7 +274,29 @@ async function getMe(req, res) {
       return res.status(404).json({ error: 'User not found.' });
     }
 
-    res.json({ user: result.rows[0] });
+    const user = result.rows[0];
+    let selectedSubjects = ['english'];
+    try {
+      const parsed = user.selected_subjects ? JSON.parse(user.selected_subjects) : [];
+      if (Array.isArray(parsed) && parsed.length > 0) selectedSubjects = parsed;
+    } catch {
+      selectedSubjects = ['english'];
+    }
+
+    res.json({
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        is_verified: user.is_verified,
+        created_at: user.created_at,
+        examDate: user.exam_date,
+        selectedSubjects,
+        avatarUri: user.avatar_uri,
+        onboardingComplete: Boolean(user.onboarding_complete),
+        is_admin: Boolean(user.is_admin),
+      },
+    });
 
   } catch (err) {
     console.error('[getMe]', err);
@@ -289,14 +324,14 @@ async function forgotPassword(req, res) {
     const expires = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
 
     await pool.query(
-      `UPDATE users SET verify_token = $1, verify_token_expires = $2 WHERE id = $3`,
+      `UPDATE users SET reset_token = $1, reset_token_expires = $2 WHERE id = $3`,
       [resetToken, expires, user.id]
     );
 
     const BASE = process.env.APP_BASE_URL || 'http://localhost:5000';
     const resetUrl = `${BASE}/api/auth/reset-password?token=${resetToken}`;
 
-    const { sendPasswordResetEmail } = require('../utils/emailService');
+    const { sendPasswordResetEmail } = require('../services/emailService');
     await sendPasswordResetEmail(user.email, user.name, resetUrl);
 
     res.json({ message: 'If an account exists with that email, a reset link has been sent.' });
@@ -316,7 +351,7 @@ async function resetPasswordPage(req, res) {
   // Check token is valid before showing the form
   try {
     const result = await pool.query(
-      `SELECT id FROM users WHERE verify_token = $1 AND verify_token_expires > NOW()`,
+      `SELECT id FROM users WHERE reset_token = $1 AND reset_token_expires > NOW()`,
       [token]
     );
 
@@ -344,7 +379,9 @@ async function resetPasswordPage(req, res) {
         .card { background: #fff; border-radius: 16px; padding: 36px 28px;
                 max-width: 420px; width: 100%;
                 box-shadow: 0 4px 24px rgba(0,0,0,0.08); }
-        .logo { text-align: center; font-size: 48px; margin-bottom: 12px; }
+        .logo { text-align: center; font-size: 20px; font-weight: 800;
+                letter-spacing: 1px; text-transform: uppercase;
+                color: #1b2a4a; margin-bottom: 16px; }
         h1 { color: #1b2a4a; text-align: center; font-size: 22px; margin-bottom: 6px; }
         p  { color: #6b7c9a; text-align: center; font-size: 14px; margin-bottom: 24px; }
         label { display: block; font-size: 13px; font-weight: 700;
@@ -366,7 +403,7 @@ async function resetPasswordPage(req, res) {
     </head>
     <body>
       <div class="card">
-        <div class="logo">🎓</div>
+        <div class="logo">CrackJAMB</div>
         <h1>Reset your password</h1>
         <p>Enter a new password for your CrackJAMB account.</p>
         <form id="resetForm">
@@ -448,7 +485,7 @@ async function resetPassword(req, res) {
   try {
     const result = await pool.query(
       `SELECT id FROM users
-       WHERE verify_token = $1 AND verify_token_expires > NOW()`,
+       WHERE reset_token = $1 AND reset_token_expires > NOW()`,
       [token]
     );
     if (result.rows.length === 0) {
@@ -458,9 +495,16 @@ async function resetPassword(req, res) {
     const salt     = await bcrypt.genSalt(10);
     const hashPwd  = await bcrypt.hash(password, salt);
 
+    // Following the link proves the address belongs to them, so an account
+    // that was still pending verification is confirmed here too.
     await pool.query(
       `UPDATE users
-       SET password = $1, verify_token = NULL, verify_token_expires = NULL
+       SET password = $1,
+           reset_token = NULL,
+           reset_token_expires = NULL,
+           is_verified = TRUE,
+           verify_token = NULL,
+           verify_token_expires = NULL
        WHERE id = $2`,
       [hashPwd, result.rows[0].id]
     );
@@ -489,7 +533,8 @@ function successPage(name, action) {
         .card { background: #fff; border-radius: 16px; padding: 40px;
                 text-align: center; max-width: 420px; width: 90%;
                 box-shadow: 0 4px 24px rgba(0,0,0,0.08); }
-        .icon { font-size: 56px; margin-bottom: 16px; }
+        .wordmark { font-size: 20px; font-weight: 800; letter-spacing: 1px;
+                    text-transform: uppercase; color: #1b2a4a; margin-bottom: 16px; }
         h1 { color: #1b2a4a; margin: 0 0 12px; }
         p  { color: #6b7c9a; line-height: 1.6; }
         .badge { background: #d4ac0d; color: #1b2a4a; font-weight: 800;
@@ -499,7 +544,7 @@ function successPage(name, action) {
     </head>
     <body>
       <div class="card">
-        <div class="icon">🎓</div>
+        <div class="wordmark">CrackJAMB</div>
         <h1>${action === 'already verified' ? 'Already Verified!' : 'Email Verified!'}</h1>
         <p>
           ${action === 'already verified'
@@ -507,7 +552,7 @@ function successPage(name, action) {
             : `Nagode ${name}! Your account is now active. Open the CrackJAMB app and login to start studying.`
           }
         </p>
-        <div class="badge">Ka yi kyau! 🎉</div>
+        <div class="badge">Ka yi kyau!</div>
       </div>
     </body>
     </html>
@@ -528,14 +573,15 @@ function errorPage(message) {
         .card { background: #fff; border-radius: 16px; padding: 40px;
                 text-align: center; max-width: 420px; width: 90%;
                 box-shadow: 0 4px 24px rgba(0,0,0,0.08); }
-        .icon { font-size: 56px; margin-bottom: 16px; }
+        .wordmark { font-size: 20px; font-weight: 800; letter-spacing: 1px;
+                    text-transform: uppercase; color: #1b2a4a; margin-bottom: 16px; }
         h1 { color: #e74c3c; margin: 0 0 12px; }
         p  { color: #6b7c9a; line-height: 1.6; }
       </style>
     </head>
     <body>
       <div class="card">
-        <div class="icon">❌</div>
+        <div class="wordmark">CrackJAMB</div>
         <h1>Verification Failed</h1>
         <p>${message}</p>
       </div>

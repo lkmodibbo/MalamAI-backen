@@ -5,7 +5,10 @@ const authMiddleware = require('../middleware/authMiddleware');
 
 // Add bookmark
 router.post('/', authMiddleware, async (req, res) => {
-  const { question_id } = req.body;
+  const question_id = parseInt(req.body.question_id, 10);
+  if (!Number.isInteger(question_id)) {
+    return res.status(400).json({ error: 'A valid question_id is required.' });
+  }
   try {
     await pool.query(
       `INSERT INTO bookmarks (user_id, question_id)
@@ -41,7 +44,7 @@ router.get('/', authMiddleware, async (req, res) => {
          pq.question,
          pq.option_a, pq.option_b, pq.option_c, pq.option_d,
          pq.answer, pq.explanation, pq.year,
-         s.name AS subject_name, s.emoji,
+         s.name AS subject_name,
          b.created_at AS bookmarked_at
        FROM bookmarks b
        JOIN past_questions pq ON b.question_id = pq.id

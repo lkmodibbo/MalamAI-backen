@@ -44,12 +44,12 @@ async function sendVerificationEmail(toEmail, name, token) {
     html: `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <div style="background: #1b2a4a; padding: 24px; text-align: center;">
-          <h1 style="color: #ffffff; margin: 0;">🎓 CrackJAMB</h1>
+          <h1 style="color: #ffffff; margin: 0;">CrackJAMB</h1>
           <p style="color: #8ba3c7; margin: 8px 0 0;">Your JAMB success starts here</p>
         </div>
 
         <div style="padding: 32px 24px;">
-          <h2 style="color: #1b2a4a;">Hi ${name}! 👋</h2>
+          <h2 style="color: #1b2a4a;">Hi ${name}!</h2>
           <p style="color: #444; line-height: 1.6;">
             Welcome to CrackJAMB! We are excited to have you join thousands 
             of Nigerian students preparing for JAMB.
@@ -73,7 +73,7 @@ async function sendVerificationEmail(toEmail, name, token) {
           </p>
 
           <p style="color: #444;">
-            Nagode! Ka yi kyau 🎓<br>
+            Nagode! Ka yi kyau<br>
             <strong>The CrackJAMB Team</strong>
           </p>
         </div>
@@ -94,18 +94,18 @@ async function sendWelcomeEmail(toEmail, name) {
   const mailOptions = {
     from:    process.env.EMAIL_FROM,
     to:      toEmail,
-    subject: 'Welcome to CrackJAMB! Ya yi kyau 🎓',
+    subject: 'Welcome to CrackJAMB! Ya yi kyau',
     html: `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <div style="background: #1b2a4a; padding: 24px; text-align: center;">
-          <h1 style="color: #ffffff; margin: 0;">🎓 CrackJAMB</h1>
+          <h1 style="color: #ffffff; margin: 0;">CrackJAMB</h1>
         </div>
         <div style="padding: 32px 24px;">
-          <h2 style="color: #1b2a4a;">Account verified! Nagode, ${name}! 🎉</h2>
+          <h2 style="color: #1b2a4a;">Account verified! Nagode, ${name}!</h2>
           <p style="color: #444; line-height: 1.6;">
             Your account is now active. Start studying and crack that JAMB exam!
           </p>
-          <p style="color: #444;">Sai haka! 💪<br><strong>The CrackJAMB Team</strong></p>
+          <p style="color: #444;">Sai haka!<br><strong>The CrackJAMB Team</strong></p>
         </div>
       </div>
     `,
@@ -122,7 +122,7 @@ async function sendPasswordResetEmail(toEmail, name, resetUrl) {
     html: `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <div style="background: #1b2a4a; padding: 24px; text-align: center;">
-          <h1 style="color: #ffffff; margin: 0;">🎓 CrackJAMB</h1>
+          <h1 style="color: #ffffff; margin: 0;">CrackJAMB</h1>
         </div>
         <div style="padding: 32px 24px;">
           <h2 style="color: #1b2a4a;">Password Reset Request</h2>

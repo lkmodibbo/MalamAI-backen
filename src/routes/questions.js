@@ -15,8 +15,21 @@ router.get('/', async (req, res) => {
     let   n      = 1;
 
     if (subject) { query += ` AND subject_id = $${n++}`; params.push(subject); }
-    if (topic)   { query += ` AND topic_id   = $${n++}`; params.push(topic);   }
-    if (year)    { query += ` AND year        = $${n++}`; params.push(year);    }
+    if (topic) {
+      if (/^\d+$/.test(String(topic))) {
+        query += ` AND topic_id = $${n++}`;
+        params.push(parseInt(topic, 10));
+      } else {
+        query += ` AND topic_id IN (SELECT id FROM topics WHERE LOWER(name) = LOWER($${n++})`;
+        params.push(topic);
+        if (subject) {
+          query += ` AND subject_id = $${n++}`;
+          params.push(subject);
+        }
+        query += `)`;
+      }
+    }
+    if (year) { query += ` AND year = $${n++}`; params.push(year); }
 
     query += ` ORDER BY RANDOM() LIMIT $${n}`;
     params.push(parseInt(count));
@@ -75,6 +88,49 @@ router.post('/save-ai', authMiddleware, async (req, res) => {
   } catch (err) {
     console.error('[save-ai]', err);
     res.status(500).json({ error: 'Could not save questions.' });
+  }
+});
+
+router.get('/past', async (req, res) => {
+  const { subject, year, count = 10 } = req.query;
+
+  try {
+    let query = `
+      SELECT id, question, option_a, option_b, option_c, option_d,
+             answer, explanation, year, subject_id
+      FROM past_questions
+      WHERE 1=1
+    `;
+    const params = [];
+    let n = 1;
+
+    if (subject) {
+      query += ` AND subject_id = $${n++}`;
+      params.push(subject);
+    }
+    if (year) {
+      query += ` AND year = $${n++}`;
+      params.push(parseInt(year, 10));
+    }
+
+    query += ` ORDER BY RANDOM() LIMIT $${n}`;
+    params.push(parseInt(count, 10));
+
+    const result = await pool.query(query, params);
+    const questions = result.rows.map((q) => ({
+      id: q.id,
+      question: q.question,
+      options: { A: q.option_a, B: q.option_b, C: q.option_c, D: q.option_d },
+      answer: q.answer,
+      explanation: q.explanation || '',
+      year: q.year,
+      subject_id: q.subject_id,
+    }));
+
+    res.json({ questions, count: questions.length, source: 'past_questions' });
+  } catch (err) {
+    console.error('[getPastQuestions]', err);
+    res.status(500).json({ error: 'Could not fetch past questions.' });
   }
 });
 

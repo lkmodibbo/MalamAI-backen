@@ -1,81 +1,62 @@
-const express    = require('express');
-const cors       = require('cors');
-const rateLimit  = require('express-rate-limit');
 require('dotenv').config();
 
-const authRoutes     = require('./src/routes/auth');
-const subjectRoutes  = require('./src/routes/subjects');
-const questionRoutes = require('./src/routes/questions');
-const quizRoutes     = require('./src/routes/quiz');
-const adminRoutes    = require('./src/routes/admin');
-const pastExamRoutes = require('./src/routes/pastExam');
-const leaderboardRoutes   = require('./src/routes/leaderboard');
-const notificationRoutes =  require('./src/routes/notification');
-const bookmarkRoutes = require('./src/routes/bookmarks');
-const helmet     = require('helmet');
+const app = require('./src/app');
+const pool = require('./src/config/database');
+const migrate = require('./src/db/migrate');
 
-
-const app  = express();
 const PORT = process.env.PORT || 5000;
 
-// ── Middleware ──────────────────────────────────────
-app.use(cors());
-app.use(express.json());
+// Fail loudly at boot rather than with confusing 403s on the first request.
+function assertRequiredEnv() {
+  const missing = [];
 
-// Request logger (remove after debugging)
-app.use((req, _res, next) => {
-  console.log(`[${req.method}] ${req.url}`);
-  next();
-});
+  if (!process.env.JWT_SECRET) missing.push('JWT_SECRET');
+  if (!process.env.DATABASE_URL && !process.env.DB_NAME) {
+    missing.push('DATABASE_URL (or DB_HOST/DB_NAME/DB_USER/DB_PASSWORD)');
+  }
 
-// Rate limiter for auth endpoints
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max:      20,
-  message:  { error: 'Too many attempts. Please try again in 15 minutes.' },
-});
-app.use('/api/auth/login',    authLimiter);
-app.use('/api/auth/register', authLimiter);
+  if (missing.length > 0) {
+    console.error(
+      `Missing required environment variable(s): ${missing.join(', ')}.\n` +
+      'Copy .env.example to .env and fill it in before starting the server.'
+    );
+    process.exit(1);
+  }
+}
 
-// ── Routes ──────────────────────────────────────────
-app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', message: 'CrackJAMB backend is running', timestamp: new Date().toISOString() });
-});
+async function start() {
+  assertRequiredEnv();
 
-app.use('/api/admin',     adminRoutes);
-app.use('/api/auth',      authRoutes);
-app.use('/api/subjects',  subjectRoutes);
-app.use('/api/questions', questionRoutes);
-app.use('/api/quiz',      quizRoutes);
-app.use('/api/past-exams', pastExamRoutes);
-app.use('/api/leaderboard', leaderboardRoutes);
-app.use('/api/notifications', notificationRoutes);
-app.use('/api/bookmarks', bookmarkRoutes);
-app.use('/api/auth/login',    authLimiter);
-app.use('/api/auth/register', authLimiter);
+  await migrate();
 
-// Security headers
-app.use(helmet());
+  const server = app.listen(PORT, () => {
+    console.log(`CrackJAMB backend running on http://localhost:${PORT}`);
+  });
 
-// Global rate limit — 100 requests per 15 minutes
-const globalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max:      100,
-  message:  { error: 'Too many requests. Please slow down.' },
-});
-app.use(globalLimiter);
+  // Stop accepting connections and drain the pool so in-flight queries finish
+  // before the process exits.
+  const shutdown = (signal) => {
+    console.log(`[server] ${signal} received, shutting down`);
+    server.close(async () => {
+      try {
+        await pool.end();
+      } catch (err) {
+        console.error('[server] error closing database pool:', err.message);
+      }
+      process.exit(0);
+    });
 
-// ── Error handlers ───────────────────────────────────
-app.use((_req, res) => {
-  res.status(404).json({ error: 'Route not found' });
-});
+    setTimeout(() => {
+      console.error('[server] forced shutdown after timeout');
+      process.exit(1);
+    }, 10000).unref();
+  };
 
-app.use((err, _req, res, _next) => {
-  console.error('[server error]', err.stack);
-  res.status(500).json({ error: 'Something went wrong on the server' });
-});
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
+}
 
-// ── Start ────────────────────────────────────────────
-app.listen(PORT, () => {
-  console.log(`🚀 CrackJAMB backend running on http://localhost:${PORT}`);
+start().catch((err) => {
+  console.error('Startup failed:', err);
+  process.exit(1);
 });

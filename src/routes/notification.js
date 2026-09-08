@@ -1,9 +1,33 @@
-const express        = require('express');
-const router         = express.Router();
-const pool           = require('../config/database');
+const express = require('express');
+const router = express.Router();
+const pool = require('../config/database');
 const authMiddleware = require('../middleware/authMiddleware');
 
-// Get user notifications
+router.get('/unread-count', authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT COUNT(*) AS count FROM notifications
+       WHERE user_id = $1 AND is_read = FALSE`,
+      [req.user.id]
+    );
+    res.json({ count: parseInt(result.rows[0].count, 10) });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not fetch count.' });
+  }
+});
+
+router.patch('/read-all', authMiddleware, async (req, res) => {
+  try {
+    await pool.query(
+      `UPDATE notifications SET is_read = TRUE WHERE user_id = $1`,
+      [req.user.id]
+    );
+    res.json({ message: 'All notifications marked as read.' });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not update notifications.' });
+  }
+});
+
 router.get('/', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
@@ -19,7 +43,6 @@ router.get('/', authMiddleware, async (req, res) => {
   }
 });
 
-// Mark notification as read
 router.patch('/:id/read', authMiddleware, async (req, res) => {
   try {
     await pool.query(
@@ -30,33 +53,6 @@ router.patch('/:id/read', authMiddleware, async (req, res) => {
     res.json({ message: 'Notification marked as read.' });
   } catch (err) {
     res.status(500).json({ error: 'Could not update notification.' });
-  }
-});
-
-// Mark all as read
-router.patch('/read-all', authMiddleware, async (req, res) => {
-  try {
-    await pool.query(
-      `UPDATE notifications SET is_read = TRUE WHERE user_id = $1`,
-      [req.user.id]
-    );
-    res.json({ message: 'All notifications marked as read.' });
-  } catch (err) {
-    res.status(500).json({ error: 'Could not update notifications.' });
-  }
-});
-
-// Get unread count
-router.get('/unread-count', authMiddleware, async (req, res) => {
-  try {
-    const result = await pool.query(
-      `SELECT COUNT(*) AS count FROM notifications
-       WHERE user_id = $1 AND is_read = FALSE`,
-      [req.user.id]
-    );
-    res.json({ count: parseInt(result.rows[0].count) });
-  } catch (err) {
-    res.status(500).json({ error: 'Could not fetch count.' });
   }
 });
 

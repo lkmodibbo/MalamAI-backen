@@ -192,7 +192,6 @@ router.get('/history', authMiddleware, async (req, res) => {
          pea.id,
          pea.subject_id,
          s.name   AS subject_name,
-         s.emoji,
          pea.year,
          pea.score,
          pea.total,
@@ -223,14 +222,13 @@ router.get('/stats', authMiddleware, async (req, res) => {
     const result = await pool.query(
       `SELECT
          s.name                                          AS subject_name,
-         s.emoji,
          COUNT(pea.id)                                   AS attempts,
          ROUND(AVG(pea.score::decimal / pea.total * 100),1) AS average_percent,
          MAX(ROUND(pea.score::decimal / pea.total * 100))   AS best_percent
        FROM past_exam_attempts pea
        JOIN subjects s ON pea.subject_id = s.id
        WHERE pea.user_id = $1
-       GROUP BY s.id, s.name, s.emoji
+       GROUP BY s.id, s.name
        ORDER BY average_percent DESC`,
       [req.user.id]
     );

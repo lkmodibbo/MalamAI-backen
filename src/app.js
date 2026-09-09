@@ -48,15 +48,17 @@ if (process.env.NODE_ENV !== 'production') {
   });
 }
 
+const isProd = process.env.NODE_ENV === 'production';
+
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 20,
-  message: { error: 'Too many attempts. Please try again in 15 minutes.' },
+  max: isProd ? 20 : 200,
+  message: { error: isProd ? 'Too many attempts. Please try again in 15 minutes.' : 'Too many attempts. Please slow down (dev).' },
 });
 
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 300,
+  max: isProd ? 300 : 10000,
   message: { error: 'Too many requests. Please slow down.' },
 });
 
@@ -80,7 +82,13 @@ app.get('/api/health', async (_req, res) => {
   }
 });
 
-app.use(globalLimiter);
+if (isProd) {
+  app.use(globalLimiter);
+} else {
+  // In development we relax the global limiter to avoid blocking local testing and hot reload activity.
+  console.log('[rate-limit] global limiter relaxed for development');
+}
+
 app.use('/api/auth/login', authLimiter);
 app.use('/api/auth/register', authLimiter);
 

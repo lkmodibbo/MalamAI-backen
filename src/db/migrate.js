@@ -63,9 +63,9 @@ const SCHEMA = [
      explanation TEXT
    )`,
 
-  `CREATE TABLE IF NOT EXISTS quiz_attempts (
-     id SERIAL PRIMARY KEY,
-     user_id INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    `CREATE TABLE IF NOT EXISTS quiz_attempts (
+      id SERIAL PRIMARY KEY,
+      user_id __USER_ID_TYPE__ NOT NULL REFERENCES users (id) ON DELETE CASCADE,
      subject_id TEXT,
      topic_id INTEGER,
      topic_name TEXT,
@@ -86,16 +86,16 @@ const SCHEMA = [
      correct_answer TEXT
    )`,
 
-  `CREATE TABLE IF NOT EXISTS streaks (
-     user_id INTEGER PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
+    `CREATE TABLE IF NOT EXISTS streaks (
+      user_id __USER_ID_TYPE__ PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
      current_streak INTEGER NOT NULL DEFAULT 0,
      longest_streak INTEGER NOT NULL DEFAULT 0,
      last_active DATE
    )`,
 
-  `CREATE TABLE IF NOT EXISTS notifications (
-     id SERIAL PRIMARY KEY,
-     user_id INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    `CREATE TABLE IF NOT EXISTS notifications (
+      id SERIAL PRIMARY KEY,
+      user_id __USER_ID_TYPE__ NOT NULL REFERENCES users (id) ON DELETE CASCADE,
      title TEXT NOT NULL,
      message TEXT,
      type TEXT,
@@ -103,9 +103,9 @@ const SCHEMA = [
      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
    )`,
 
-  `CREATE TABLE IF NOT EXISTS admin_audit (
-     id SERIAL PRIMARY KEY,
-     admin_id INTEGER REFERENCES users (id) ON DELETE SET NULL,
+    `CREATE TABLE IF NOT EXISTS admin_audit (
+      id SERIAL PRIMARY KEY,
+      admin_id __USER_ID_TYPE__ REFERENCES users (id) ON DELETE SET NULL,
      action TEXT NOT NULL,
      resource_type TEXT,
      resource_id TEXT,
@@ -113,9 +113,9 @@ const SCHEMA = [
      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
    )`,
 
-  `CREATE TABLE IF NOT EXISTS bookmarks (
-     id SERIAL PRIMARY KEY,
-     user_id INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    `CREATE TABLE IF NOT EXISTS bookmarks (
+      id SERIAL PRIMARY KEY,
+      user_id __USER_ID_TYPE__ NOT NULL REFERENCES users (id) ON DELETE CASCADE,
      question_id INTEGER NOT NULL,
      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
      UNIQUE (user_id, question_id)
@@ -235,8 +235,26 @@ const INDEXES = [
 ];
 
 async function migrate() {
+  // Determine the type used for users.id on the target database. Some
+  // existing installations use UUID for users.id while the current schema
+  // defaults to SERIAL (integer). To avoid foreign key type mismatches we
+  // adapt any user-id columns to match the actual type in the database.
+  let userIdType = 'INTEGER';
+  try {
+    const res = await pool.query("SELECT udt_name FROM information_schema.columns WHERE table_name='users' AND column_name='id'");
+    if (res.rows.length > 0 && res.rows[0].udt_name === 'uuid') {
+      userIdType = 'UUID';
+    }
+  } catch (err) {
+    // if the query fails, default to INTEGER — the SCHEMA create is written
+    // to be harmless on fresh DBs.
+  }
+
+  // Prepare statements, substituting the placeholder with the detected type
+  const statements = SCHEMA.map((s) => s.replace(/__USER_ID_TYPE__/g, userIdType));
+
   // The base schema must succeed — without it nothing else can work.
-  for (const sql of SCHEMA) {
+  for (const sql of statements) {
     await pool.query(sql);
   }
 

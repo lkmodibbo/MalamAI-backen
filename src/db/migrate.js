@@ -103,6 +103,16 @@ const SCHEMA = [
      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
    )`,
 
+  `CREATE TABLE IF NOT EXISTS admin_audit (
+     id SERIAL PRIMARY KEY,
+     admin_id INTEGER REFERENCES users (id) ON DELETE SET NULL,
+     action TEXT NOT NULL,
+     resource_type TEXT,
+     resource_id TEXT,
+     details JSONB,
+     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+   )`,
+
   `CREATE TABLE IF NOT EXISTS bookmarks (
      id SERIAL PRIMARY KEY,
      user_id INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
@@ -172,6 +182,7 @@ const BACKFILL = [
 
   `ALTER TABLE questions ADD COLUMN IF NOT EXISTS year INTEGER`,
   `ALTER TABLE questions ADD COLUMN IF NOT EXISTS is_ai BOOLEAN DEFAULT FALSE`,
+  `ALTER TABLE questions ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`,
 
   `ALTER TABLE quiz_attempts ADD COLUMN IF NOT EXISTS topic_name TEXT`,
   `ALTER TABLE quiz_attempts ADD COLUMN IF NOT EXISTS time_taken INTEGER DEFAULT 0`,
@@ -179,6 +190,8 @@ const BACKFILL = [
   `ALTER TABLE quiz_answers ADD COLUMN IF NOT EXISTS question_text TEXT`,
   `ALTER TABLE quiz_answers ADD COLUMN IF NOT EXISTS correct_answer TEXT`,
   `ALTER TABLE quiz_answers ALTER COLUMN question_id DROP NOT NULL`,
+
+  `ALTER TABLE past_questions ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`,
 
   `ALTER TABLE streaks ADD COLUMN IF NOT EXISTS current_streak INTEGER DEFAULT 0`,
   `ALTER TABLE streaks ADD COLUMN IF NOT EXISTS longest_streak INTEGER DEFAULT 0`,

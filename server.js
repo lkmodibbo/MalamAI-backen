@@ -29,6 +29,19 @@ async function start() {
 
   await migrate();
 
+  // Ensure at least one admin exists after migrations/seed. If none, fail loudly
+  try {
+    const r = await pool.query('SELECT COUNT(*) AS total FROM users WHERE is_admin = TRUE');
+    const totalAdmins = parseInt(r.rows[0].total, 10) || 0;
+    if (totalAdmins === 0) {
+      console.error('[startup] no admin accounts found after migration. Set ADMIN_EMAIL/ADMIN_PASSWORD to seed one.');
+      process.exit(1);
+    }
+  } catch (err) {
+    console.error('[startup] failed to verify admin accounts:', err.message);
+    process.exit(1);
+  }
+
   const server = app.listen(PORT, () => {
     console.log(`CrackJAMB backend running on http://localhost:${PORT}`);
   });

@@ -17,6 +17,17 @@ const notesRoutes = require('./routes/notes');
 const mockExamRoutes = require('./routes/mockExam');
 
 const pool = require('./config/database');
+let Sentry;
+if (process.env.SENTRY_DSN) {
+  try {
+    Sentry = require('@sentry/node');
+    Sentry.init({ dsn: process.env.SENTRY_DSN });
+    console.log('[sentry] initialized');
+  } catch (err) {
+    console.warn('[sentry] init failed:', err.message);
+    Sentry = null;
+  }
+}
 
 const app = express();
 
@@ -91,7 +102,8 @@ app.use((_req, res) => {
 });
 
 app.use((err, _req, res, _next) => {
-  console.error('[server error]', err.stack);
+  console.error('[server error]', err.stack || err.message || err);
+  if (Sentry) Sentry.captureException(err);
   res.status(500).json({ error: 'Something went wrong on the server' });
 });
 

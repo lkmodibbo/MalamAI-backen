@@ -2,6 +2,29 @@ const express = require('express');
 const jwt = require('jsonwebtoken');
 const router = express.Router();
 const pool = require('../config/database');
+const MAX_BULK_ITEMS = 200;
+
+function validateQuestionPayload(q) {
+  if (!q || typeof q !== 'object') return 'Invalid question object';
+  const fields = ['subject_id', 'question', 'option_a', 'option_b', 'option_c', 'option_d', 'answer'];
+  for (const f of fields) {
+    if (!q[f] || String(q[f]).trim().length === 0) return `${f} is required`;
+  }
+  if (!['A', 'B', 'C', 'D'].includes(String(q.answer).toUpperCase())) return 'Answer must be A, B, C or D';
+  if (String(q.question).length > 4000) return 'Question too long';
+  for (const opt of ['option_a', 'option_b', 'option_c', 'option_d']) {
+    if (String(q[opt]).length > 1000) return `${opt} too long`;
+  }
+  if (q.year && (Number(q.year) < 1900 || Number(q.year) > 2100)) return 'Invalid year';
+  return null;
+}
+
+function validatePastQuestionPayload(q) {
+  const err = validateQuestionPayload(q);
+  if (err) return err;
+  if (!q.year) return 'year is required';
+  return null;
+}
 
 function parseSubjects(raw) {
   try {
@@ -37,6 +60,18 @@ async function adminOnly(req, res, next) {
     next();
   } catch {
     return res.status(403).json({ error: 'Admin access only.' });
+  }
+}
+
+async function logAudit(adminId, action, resourceType = null, resourceId = null, details = null) {
+  try {
+    await pool.query(
+      `INSERT INTO admin_audit (admin_id, action, resource_type, resource_id, details)
+       VALUES ($1,$2,$3,$4,$5)`,
+      [adminId || null, action, resourceType, resourceId, details ? JSON.stringify(details) : null]
+    );
+  } catch (err) {
+    console.warn('[audit] failed to record audit entry:', err.message);
   }
 }
 
@@ -78,21 +113,40 @@ router.post('/subjects/bulk', adminOnly, async (req, res) => {
     return res.status(400).json({ error: 'subjects array is required.' });
   }
 
+  if (subjects.length > MAX_BULK_ITEMS) {
+    return res.status(400).json({ error: `Too many subjects; max ${MAX_BULK_ITEMS} per request.` });
+  }
+
   try {
     const added = [];
-    for (const s of subjects) {
-      const result = await pool.query(
-        `INSERT INTO subjects (id, name)
-         VALUES ($1, $2)
-         ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name
-         RETURNING *`,
-        [s.id.toLowerCase(), s.name]
-      );
-      added.push(result.rows[0]);
+    const errors = [];
+    for (const [i, s] of subjects.entries()) {
+      if (!s || !s.id || !s.name) {
+        errors.push({ index: i, error: 'id and name are required' });
+        continue;
+      }
+      if (String(s.id).length > 64 || String(s.name).length > 255) {
+        errors.push({ index: i, id: s.id || null, error: 'id or name too long' });
+        continue;
+      }
+      try {
+        const result = await pool.query(
+          `INSERT INTO subjects (id, name)
+           VALUES ($1, $2)
+           ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name
+           RETURNING *`,
+          [String(s.id).toLowerCase(), s.name]
+        );
+        added.push(result.rows[0]);
+          try { await logAudit(req.user?.id || null, 'bulk_add_subject', 'subject', result.rows[0].id, { id: result.rows[0].id, name: result.rows[0].name }); } catch (e) {}
+      } catch (err) {
+        errors.push({ index: i, id: s.id || null, error: err.message });
+      }
     }
     res.status(201).json({
       message: `${added.length} subjects added successfully`,
       subjects: added,
+      errors,
     });
   } catch (err) {
     console.error('[admin] bulk add subjects failed:', err);
@@ -112,7 +166,7 @@ async function upsertTopic(subjectId, name) {
   );
   if (existing.rows.length > 0) return existing.rows[0];
 
-  const created = await pool.query(
+    const result = await pool.query(
     `INSERT INTO topics (subject_id, name) VALUES ($1, $2) RETURNING *`,
     [subject, trimmed]
   );
@@ -128,6 +182,7 @@ router.post('/topics', adminOnly, async (req, res) => {
   if (!subject_id || !name) {
     return res.status(400).json({ error: 'subject_id and name are required.' });
   }
+    try { await logAudit(req.user?.id || null, 'add_question', 'question', result.rows[0].id, { subject_id: result.rows[0].subject_id }); } catch (e) {}
 
   try {
     const topic = await upsertTopic(subject_id, name);
@@ -135,6 +190,7 @@ router.post('/topics', adminOnly, async (req, res) => {
       message: 'Topic added successfully',
       topic,
     });
+    try { await logAudit(req.user?.id || null, 'add_topic', 'topic', topic.id, { subject_id: topic.subject_id, name: topic.name }); } catch (e) {}
   } catch (err) {
     console.error('[admin] add topic failed:', err);
     res.status(500).json({ error: 'Could not add topic.' });
@@ -151,14 +207,32 @@ router.post('/topics/bulk', adminOnly, async (req, res) => {
     return res.status(400).json({ error: 'topics array is required.' });
   }
 
+  if (topics.length > MAX_BULK_ITEMS) {
+    return res.status(400).json({ error: `Too many topics; max ${MAX_BULK_ITEMS} per request.` });
+  }
+
   try {
     const added = [];
-    for (const t of topics) {
-      added.push(await upsertTopic(t.subject_id, t.name));
+    const errors = [];
+    for (const [i, t] of topics.entries()) {
+      if (!t || !t.subject_id || !t.name) {
+        errors.push({ index: i, error: 'subject_id and name are required' });
+        continue;
+      }
+      if (String(t.name).length > 255) {
+        errors.push({ index: i, error: 'name too long' });
+        continue;
+      }
+      try {
+        added.push(await upsertTopic(t.subject_id, t.name));
+      } catch (err) {
+        errors.push({ index: i, error: err.message });
+      }
     }
     res.status(201).json({
       message: `${added.length} topics added successfully`,
       topics: added,
+      errors,
     });
   } catch (err) {
     console.error('[admin] bulk add topics failed:', err);
@@ -184,7 +258,9 @@ router.delete('/subjects/:id', adminOnly, async (req, res) => {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 router.delete('/topics/:id', adminOnly, async (req, res) => {
   try {
-    await pool.query('DELETE FROM topics WHERE id = $1', [req.params.id]);
+    const result = await pool.query('DELETE FROM topics WHERE id = $1 RETURNING id', [req.params.id]);
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Topic not found.' });
+    await logAudit(req.user?.id || null, 'delete_topic', 'topic', req.params.id, null);
     res.json({ message: 'Topic deleted successfully' });
   } catch (err) {
     console.error('[admin] delete topic failed:', err);
@@ -221,16 +297,13 @@ router.get('/topics', adminOnly, async (req, res) => {
 
 router.get('/overview', adminOnly, async (req, res) => {
   try {
-    const result = await pool.query(`
-      SELECT 
-        s.id,
-        s.name,
-        COUNT(t.id) AS topic_count
-      FROM subjects s
-      LEFT JOIN topics t ON t.subject_id = s.id
-      GROUP BY s.id, s.name
-      ORDER BY s.name
-    `);
+    const result = await pool.query(
+      `SELECT s.id, s.name, COUNT(t.id) AS topic_count
+       FROM subjects s
+       LEFT JOIN topics t ON t.subject_id = s.id
+       GROUP BY s.id, s.name
+       ORDER BY s.name`
+    );
     res.json({ subjects: result.rows });
   } catch (err) {
     res.status(500).json({ error: 'Could not fetch overview.' });
@@ -286,23 +359,33 @@ router.post('/questions/bulk', adminOnly, async (req, res) => {
     return res.status(400).json({ error: 'questions array is required.' });
   }
 
+  if (questions.length > MAX_BULK_ITEMS) {
+    return res.status(400).json({ error: `Too many questions; max ${MAX_BULK_ITEMS} per request.` });
+  }
+
   try {
     const added  = [];
     const errors = [];
 
     for (const [i, q] of questions.entries()) {
+      const v = validateQuestionPayload(q);
+      if (v) {
+        errors.push({ index: i, question: q.question || null, error: v });
+        continue;
+      }
       try {
-        const result = await pool.query(
+          const result = await pool.query(
           `INSERT INTO questions
              (subject_id, topic_id, question, option_a, option_b,
               option_c, option_d, answer, explanation, year, is_ai)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, FALSE)
            RETURNING id, question`,
-          [q.subject_id, q.topic_id || null, q.question,
+          [String(q.subject_id).toLowerCase(), q.topic_id || null, q.question,
            q.option_a, q.option_b, q.option_c, q.option_d,
-           q.answer.toUpperCase(), q.explanation || null, q.year || null]
+           String(q.answer).toUpperCase(), q.explanation || null, q.year || null]
         );
         added.push(result.rows[0]);
+          try { await logAudit(req.user?.id || null, 'bulk_add_question', 'question', result.rows[0].id, { index: i }); } catch (e) {}
       } catch (err) {
         errors.push({ index: i, question: q.question, error: err.message });
       }
@@ -324,10 +407,23 @@ router.post('/questions/bulk', adminOnly, async (req, res) => {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 router.delete('/questions/:id', adminOnly, async (req, res) => {
   try {
-    await pool.query('DELETE FROM questions WHERE id = $1', [req.params.id]);
-    res.json({ message: 'Question deleted successfully' });
+    const result = await pool.query('UPDATE questions SET deleted_at = NOW() WHERE id = $1 RETURNING id', [req.params.id]);
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Question not found.' });
+    await logAudit(req.user?.id || null, 'soft_delete_question', 'question', req.params.id, null);
+    res.json({ message: 'Question soft-deleted.' });
   } catch (err) {
     res.status(500).json({ error: 'Could not delete question.' });
+  }
+});
+
+router.post('/questions/:id/restore', adminOnly, async (req, res) => {
+  try {
+    const result = await pool.query('UPDATE questions SET deleted_at = NULL WHERE id = $1 RETURNING id', [req.params.id]);
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Question not found.' });
+    await logAudit(req.user?.id || null, 'restore_question', 'question', req.params.id, null);
+    res.json({ message: 'Question restored.' });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not restore question.' });
   }
 });
 
@@ -335,7 +431,7 @@ router.delete('/questions/:id', adminOnly, async (req, res) => {
 // GET ALL QUESTIONS (with filters)
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 router.get('/questions', adminOnly, async (req, res) => {
-  const { subject, topic, year, page = 1, limit = 20 } = req.query;
+  const { subject, topic, year, page = 1, limit = 20, deleted } = req.query;
   const offset = (page - 1) * limit;
 
   try {
@@ -352,6 +448,8 @@ router.get('/questions', adminOnly, async (req, res) => {
     if (subject) { query += ` AND q.subject_id = $${count++}`; params.push(subject); }
     if (topic)   { query += ` AND q.topic_id   = $${count++}`; params.push(topic);   }
     if (year)    { query += ` AND q.year        = $${count++}`; params.push(year);    }
+    if (deleted === '1' || deleted === 'true') { query += ` AND q.deleted_at IS NOT NULL`; }
+    else { query += ` AND q.deleted_at IS NULL`; }
 
     query += ` ORDER BY q.created_at DESC LIMIT $${count++} OFFSET $${count}`;
     params.push(limit, offset);
@@ -374,13 +472,17 @@ router.post('/past-questions/bulk', adminOnly, async (req, res) => {
     return res.status(400).json({ error: 'questions array is required.' });
   }
 
+  if (questions.length > MAX_BULK_ITEMS) {
+    return res.status(400).json({ error: `Too many questions; max ${MAX_BULK_ITEMS} per request.` });
+  }
+
   const added  = [];
   const errors = [];
 
   for (const [i, q] of questions.entries()) {
-    if (!q.subject_id || !q.year || !q.question ||
-        !q.option_a || !q.option_b || !q.option_c || !q.option_d || !q.answer) {
-      errors.push({ index: i, error: 'Missing required fields' });
+    const v = validatePastQuestionPayload(q);
+    if (v) {
+      errors.push({ index: i, error: v });
       continue;
     }
     try {
@@ -389,9 +491,9 @@ router.post('/past-questions/bulk', adminOnly, async (req, res) => {
            (subject_id, year, question, option_a, option_b, option_c, option_d, answer, explanation)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
          RETURNING id`,
-        [q.subject_id, parseInt(q.year), q.question,
+        [String(q.subject_id).toLowerCase(), parseInt(q.year), q.question,
          q.option_a, q.option_b, q.option_c, q.option_d,
-         q.answer.toUpperCase(), q.explanation || null]
+         String(q.answer).toUpperCase(), q.explanation || null]
       );
       added.push(result.rows[0].id);
     } catch (err) {
@@ -626,6 +728,47 @@ router.get('/users/:id', adminOnly, async (req, res) => {
   }
 });
 
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// SET USER ROLE (PROMOTE / DEMOTE)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+router.post('/users/:id/role', adminOnly, async (req, res) => {
+  const userId = String(req.params.id || '').trim();
+  if (!userId) return res.status(400).json({ error: 'Invalid user id.' });
+
+  // Expect { is_admin: true|false }
+  const isAdmin = !!req.body.is_admin;
+
+  // Prevent an admin from demoting themselves via this endpoint
+  if (req.user && String(req.user.id) === String(userId) && !isAdmin) {
+    return res.status(400).json({ error: 'You cannot demote your own account.' });
+  }
+
+  try {
+    // If demoting, ensure we don't remove the last admin
+    if (!isAdmin) {
+      const adminsRes = await pool.query('SELECT COUNT(*) AS total FROM users WHERE is_admin = TRUE');
+      const adminCount = parseInt(adminsRes.rows[0].total, 10) || 0;
+      // If the target user is currently an admin and there's only one admin, prevent demotion
+      const targetRes = await pool.query('SELECT is_admin FROM users WHERE id = $1', [userId]);
+      if (targetRes.rows.length === 0) return res.status(404).json({ error: 'User not found.' });
+      if (targetRes.rows[0].is_admin && adminCount <= 1) {
+        return res.status(400).json({ error: 'Cannot demote the last admin account.' });
+      }
+    }
+
+    const result = await pool.query(
+      `UPDATE users SET is_admin = $1 WHERE id = $2 RETURNING id, name, email, is_admin`,
+      [isAdmin, userId]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'User not found.' });
+    await logAudit(req.user?.id || null, isAdmin ? 'promote_user' : 'demote_user', 'user', userId, { is_admin: isAdmin });
+    res.json({ user: result.rows[0] });
+  } catch (err) {
+    console.error('[admin] set user role:', err);
+    res.status(500).json({ error: 'Could not update user role.' });
+  }
+});
+
 router.get('/leaderboard', adminOnly, async (req, res) => {
   const subjectId = String(req.query.subject || '').trim();
   try {
@@ -664,6 +807,102 @@ router.get('/leaderboard', adminOnly, async (req, res) => {
   }
 });
 
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// GET ADMIN AUDIT LOGS
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+router.get('/audit', adminOnly, async (req, res) => {
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 50));
+  const offset = (page - 1) * limit;
+  const action = String(req.query.action || '').trim();
+  const resource = String(req.query.resource || '').trim();
+
+  try {
+    const where = [];
+    const params = [];
+    let i = 1;
+    if (action) { where.push(`a.action = $${i++}`); params.push(action); }
+    if (resource) { where.push(`a.resource_type = $${i++}`); params.push(resource); }
+    const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+    const countRes = await pool.query(`SELECT COUNT(*) AS total FROM admin_audit a ${whereClause}`, params);
+    const rowsRes = await pool.query(
+      `SELECT a.id, a.admin_id, u.name AS admin_name, a.action, a.resource_type, a.resource_id, a.details, a.created_at
+       FROM admin_audit a
+       LEFT JOIN users u ON u.id = a.admin_id
+       ${whereClause}
+       ORDER BY a.created_at DESC
+       LIMIT $${i++} OFFSET $${i}`,
+      [...params, limit, offset]
+    );
+
+    res.json({
+      logs: rowsRes.rows,
+      page,
+      limit,
+      total: parseInt(countRes.rows[0].total, 10) || 0,
+    });
+  } catch (err) {
+    console.error('[admin] audit list:', err);
+    res.status(500).json({ error: 'Could not fetch audit logs.' });
+  }
+});
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// EXPORT ADMIN AUDIT LOGS AS CSV
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+router.get('/audit/export', adminOnly, async (req, res) => {
+  const action = String(req.query.action || '').trim();
+  const resource = String(req.query.resource || '').trim();
+
+  try {
+    const where = [];
+    const params = [];
+    let i = 1;
+    if (action) { where.push(`a.action = $${i++}`); params.push(action); }
+    if (resource) { where.push(`a.resource_type = $${i++}`); params.push(resource); }
+    const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+    const rowsRes = await pool.query(
+      `SELECT a.id, a.admin_id, u.name AS admin_name, a.action, a.resource_type, a.resource_id, a.details, a.created_at
+       FROM admin_audit a
+       LEFT JOIN users u ON u.id = a.admin_id
+       ${whereClause}
+       ORDER BY a.created_at DESC`,
+      params
+    );
+
+    const escape = (v) => {
+      if (v === null || v === undefined) return '';
+      const s = typeof v === 'string' ? v : JSON.stringify(v);
+      return `"${s.replace(/"/g, '""')}"`;
+    };
+
+    const header = ['id','admin_id','admin_name','action','resource_type','resource_id','details','created_at'];
+    const lines = [header.join(',')];
+    for (const row of rowsRes.rows) {
+      lines.push([
+        row.id,
+        row.admin_id,
+        row.admin_name,
+        row.action,
+        row.resource_type,
+        row.resource_id,
+        row.details ? JSON.stringify(row.details) : '',
+        row.created_at ? row.created_at.toISOString() : '',
+      ].map(escape).join(','));
+    }
+
+    const csv = lines.join('\n');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="admin_audit_${Date.now()}.csv"`);
+    res.send(csv);
+  } catch (err) {
+    console.error('[admin] export audit:', err);
+    res.status(500).json({ error: 'Could not export audit logs.' });
+  }
+});
+
 router.get('/past-questions', adminOnly, async (req, res) => {
   const page = Math.max(1, parseInt(req.query.page, 10) || 1);
   const limit = Math.min(50, Math.max(1, parseInt(req.query.limit, 10) || 20));
@@ -671,6 +910,7 @@ router.get('/past-questions', adminOnly, async (req, res) => {
   const subject = String(req.query.subject || '').trim();
   const year = String(req.query.year || '').trim();
   const q = String(req.query.q || '').trim();
+  const deleted = String(req.query.deleted || '').trim();
 
   try {
     const clauses = [];
@@ -687,6 +927,12 @@ router.get('/past-questions', adminOnly, async (req, res) => {
     if (q) {
       clauses.push(`question ILIKE $${i++}`);
       params.push(`%${q}%`);
+    }
+    // default: only non-deleted items unless deleted=1
+    if (deleted === '1' || deleted === 'true') {
+      clauses.push(`deleted_at IS NOT NULL`);
+    } else {
+      clauses.push(`deleted_at IS NULL`);
     }
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
 
@@ -748,9 +994,34 @@ router.post('/past-questions', adminOnly, async (req, res) => {
       message: 'Past question added.',
       question: result.rows[0],
     });
+    try { await logAudit(req.user?.id || null, 'add_past_question', 'past_question', result.rows[0].id, { subject_id: result.rows[0].subject_id }); } catch (e) {}
   } catch (err) {
     console.error('[admin] add past question:', err);
     res.status(500).json({ error: 'Could not add past question.' });
+  }
+});
+
+router.delete('/past-questions/:id', adminOnly, async (req, res) => {
+  try {
+    const result = await pool.query('UPDATE past_questions SET deleted_at = NOW() WHERE id = $1 RETURNING id', [req.params.id]);
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Past question not found.' });
+    await logAudit(req.user?.id || null, 'soft_delete_past_question', 'past_question', req.params.id, null);
+    res.json({ message: 'Past question soft-deleted.' });
+  } catch (err) {
+    console.error('[admin] delete past question:', err);
+    res.status(500).json({ error: 'Could not delete past question.' });
+  }
+});
+
+router.post('/past-questions/:id/restore', adminOnly, async (req, res) => {
+  try {
+    const result = await pool.query('UPDATE past_questions SET deleted_at = NULL WHERE id = $1 RETURNING id', [req.params.id]);
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Past question not found.' });
+    await logAudit(req.user?.id || null, 'restore_past_question', 'past_question', req.params.id, null);
+    res.json({ message: 'Past question restored.' });
+  } catch (err) {
+    console.error('[admin] restore past question:', err);
+    res.status(500).json({ error: 'Could not restore past question.' });
   }
 });
 
@@ -763,6 +1034,7 @@ router.delete('/past-questions/:id', adminOnly, async (req, res) => {
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Past question not found.' });
     }
+    await logAudit(req.user?.id || null, 'delete_past_question', 'past_question', req.params.id, null);
     res.json({ message: 'Past question deleted.' });
   } catch (err) {
     console.error('[admin] delete past question:', err);
@@ -789,6 +1061,7 @@ router.post('/notify-all', adminOnly, async (req, res) => {
         [user.id, title, message, type]
       );
     }
+    await logAudit(req.user?.id || null, 'notify_all', 'notification', null, { title, count: users.rows.length });
     res.json({ message: `Notification sent to ${users.rows.length} users.` });
   } catch (err) {
     res.status(500).json({ error: 'Could not send notifications.' });

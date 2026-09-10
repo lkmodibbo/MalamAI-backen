@@ -3,6 +3,14 @@ const jwt         = require('jsonwebtoken');
 const crypto      = require('crypto');
 const pool        = require('../config/database');
 const { sendVerificationEmail, sendWelcomeEmail } = require('../services/emailService');
+const {
+  escapeHtml,
+  escapeJsString,
+  assertPassword,
+  MIN_PASSWORD_LENGTH,
+} = require('../utils/security');
+
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '12h';
 
 // REGISTER
 async function register(req, res) {
@@ -12,8 +20,9 @@ async function register(req, res) {
     return res.status(400).json({ error: 'Name, email and password are required.' });
   }
 
-  if (password.length < 6) {
-    return res.status(400).json({ error: 'Password must be at least 6 characters.' });
+  const passwordError = assertPassword(password);
+  if (passwordError) {
+    return res.status(400).json({ error: passwordError });
   }
 
   try {
@@ -161,13 +170,14 @@ async function resendVerification(req, res) {
     );
 
     if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'No account found with this email.' });
+      // Same message as a successful send so callers cannot probe for accounts.
+      return res.json({ message: 'If an account needs verification, a link has been sent.' });
     }
 
     const user = result.rows[0];
 
     if (user.is_verified) {
-      return res.status(400).json({ error: 'This account is already verified. Please login.' });
+      return res.json({ message: 'If an account needs verification, a link has been sent.' });
     }
 
     let verifyToken = user.verify_token;
@@ -190,7 +200,7 @@ async function resendVerification(req, res) {
 
     await sendVerificationEmail(user.email, user.name, verifyToken);
 
-    res.json({ message: 'Verification email sent. Please check your inbox.' });
+    res.json({ message: 'If an account needs verification, a link has been sent.' });
 
   } catch (err) {
     console.error('[resendVerification]', err);
@@ -240,7 +250,7 @@ async function login(req, res) {
     const token = jwt.sign(
       { id: user.id, email: user.email, is_admin: isAdmin },
       process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN }
+      { expiresIn: JWT_EXPIRES_IN }
     );
 
     res.json({
@@ -408,7 +418,7 @@ async function resetPasswordPage(req, res) {
         <p>Enter a new password for your CrackJAMB account.</p>
         <form id="resetForm">
           <label>New password</label>
-          <input type="password" id="password" placeholder="Min. 6 characters" required minlength="6" />
+          <input type="password" id="password" placeholder="Min. ${MIN_PASSWORD_LENGTH} characters" required minlength="${MIN_PASSWORD_LENGTH}" />
           <label>Confirm new password</label>
           <input type="password" id="confirmPassword" placeholder="Re-enter new password" required />
           <div class="error" id="errorMsg"></div>
@@ -433,8 +443,8 @@ async function resetPasswordPage(req, res) {
             errorMsg.style.display = 'block';
             return;
           }
-          if (password.length < 6) {
-            errorMsg.textContent   = 'Password must be at least 6 characters.';
+          if (password.length < ${MIN_PASSWORD_LENGTH}) {
+            errorMsg.textContent   = 'Password must be at least ${MIN_PASSWORD_LENGTH} characters.';
             errorMsg.style.display = 'block';
             return;
           }
@@ -443,10 +453,10 @@ async function resetPasswordPage(req, res) {
           submitBtn.disabled    = true;
 
           try {
-            const res = await fetch('${BASE}/api/auth/reset-password', {
+            const res = await fetch('${escapeJsString(BASE)}/api/auth/reset-password', {
               method:  'POST',
               headers: { 'Content-Type': 'application/json' },
-              body:    JSON.stringify({ token: '${token}', password }),
+              body:    JSON.stringify({ token: '${escapeJsString(token)}', password }),
             });
             const data = await res.json();
             if (!res.ok) {
@@ -478,8 +488,9 @@ async function resetPassword(req, res) {
     return res.status(400).json({ error: 'Token and new password are required.' });
   }
 
-  if (password.length < 6) {
-    return res.status(400).json({ error: 'Password must be at least 6 characters.' });
+  const passwordError = assertPassword(password);
+  if (passwordError) {
+    return res.status(400).json({ error: passwordError });
   }
 
   try {
@@ -520,6 +531,7 @@ async function resetPassword(req, res) {
 // HTML PAGE HELPERS
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 function successPage(name, action) {
+  const safeName = escapeHtml(name);
   return `
     <!DOCTYPE html>
     <html>
@@ -548,8 +560,8 @@ function successPage(name, action) {
         <h1>${action === 'already verified' ? 'Already Verified!' : 'Email Verified!'}</h1>
         <p>
           ${action === 'already verified'
-            ? `${name}, your account is already verified. Open the CrackJAMB app and login.`
-            : `Nagode ${name}! Your account is now active. Open the CrackJAMB app and login to start studying.`
+            ? `${safeName}, your account is already verified. Open the CrackJAMB app and login.`
+            : `Nagode ${safeName}! Your account is now active. Open the CrackJAMB app and login to start studying.`
           }
         </p>
         <div class="badge">Ka yi kyau!</div>
@@ -560,6 +572,7 @@ function successPage(name, action) {
 }
 
 function errorPage(message) {
+  const safeMessage = escapeHtml(message);
   return `
     <!DOCTYPE html>
     <html>
@@ -583,7 +596,7 @@ function errorPage(message) {
       <div class="card">
         <div class="wordmark">CrackJAMB</div>
         <h1>Verification Failed</h1>
-        <p>${message}</p>
+        <p>${safeMessage}</p>
       </div>
     </body>
     </html>

@@ -30,6 +30,7 @@ if (process.env.SENTRY_DSN) {
 }
 
 const app = express();
+const isProd = process.env.NODE_ENV === 'production';
 
 // Platforms like Render and Railway terminate TLS upstream, so the rate limiter
 // needs to read the client IP from X-Forwarded-For rather than the socket.
@@ -38,22 +39,31 @@ if (process.env.TRUST_PROXY !== 'false') {
 }
 
 app.use(helmet({ contentSecurityPolicy: false }));
-app.use(cors({ origin: process.env.CORS_ORIGIN || '*' }));
+
+const corsOrigin = process.env.CORS_ORIGIN || (isProd ? undefined : '*');
+if (isProd && (!corsOrigin || corsOrigin === '*')) {
+  console.warn('[cors] CORS_ORIGIN is unset or wildcard in production — pin it to your app origin.');
+}
+app.use(cors({ origin: corsOrigin || '*' }));
 app.use(express.json({ limit: '2mb' }));
 
-if (process.env.NODE_ENV !== 'production') {
+if (!isProd) {
   app.use((req, _res, next) => {
     console.log(`[${req.method}] ${req.url}`);
     next();
   });
 }
 
-const isProd = process.env.NODE_ENV === 'production';
-
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: isProd ? 20 : 200,
   message: { error: isProd ? 'Too many attempts. Please try again in 15 minutes.' : 'Too many attempts. Please slow down (dev).' },
+});
+
+const sensitiveAuthLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: isProd ? 10 : 100,
+  message: { error: 'Too many attempts. Please try again later.' },
 });
 
 const globalLimiter = rateLimit({
@@ -91,6 +101,9 @@ if (isProd) {
 
 app.use('/api/auth/login', authLimiter);
 app.use('/api/auth/register', authLimiter);
+app.use('/api/auth/forgot-password', sensitiveAuthLimiter);
+app.use('/api/auth/resend-verification', sensitiveAuthLimiter);
+app.use('/api/auth/reset-password', sensitiveAuthLimiter);
 
 app.use('/api/admin', adminRoutes);
 app.use('/api/auth', authRoutes);

@@ -308,9 +308,24 @@ async function seedSubjects() {
 }
 
 async function seedAdmin() {
-  const email = String(process.env.ADMIN_EMAIL || 'admin@crackjamb.local').toLowerCase();
-  const password = process.env.ADMIN_PASSWORD || 'Admin12345';
+  const isProd = process.env.NODE_ENV === 'production';
+  const email = process.env.ADMIN_EMAIL
+    ? String(process.env.ADMIN_EMAIL).toLowerCase()
+    : (isProd ? null : 'admin@crackjamb.local');
+  const password = process.env.ADMIN_PASSWORD || (isProd ? null : 'Admin12345');
   const name = process.env.ADMIN_NAME || 'CrackJAMB Admin';
+
+  if (!email || !password) {
+    if (isProd) {
+      console.error('[migrate] ADMIN_EMAIL and ADMIN_PASSWORD are required to seed an admin in production.');
+    }
+    return;
+  }
+
+  if (isProd && (password.length < 12 || password === 'Admin12345')) {
+    console.error('[migrate] Refusing to seed a weak ADMIN_PASSWORD in production.');
+    return;
+  }
 
   try {
     const existing = await pool.query(

@@ -65,16 +65,63 @@ router.post('/attempt', authMiddleware, async (req, res) => {
       console.warn('[saveAttempt] topic resolve skipped', err.message);
     }
 
+    // Prefer server-side scoring whenever the attempt references banked questions.
+    let finalScore = Number(score) || 0;
+    let finalTotal = Number(total) || 0;
+    let gradedAnswers = Array.isArray(answers) ? answers : [];
+
+    const bankedIds = gradedAnswers
+      .map((a) => parseInt(a.question_id, 10))
+      .filter((id) => Number.isInteger(id));
+
+    if (bankedIds.length > 0) {
+      const correctRows = await pool.query(
+        `SELECT id, answer, explanation, question
+         FROM questions
+         WHERE id = ANY($1::int[]) AND deleted_at IS NULL`,
+        [bankedIds]
+      );
+      const answerMap = {};
+      for (const row of correctRows.rows) {
+        answerMap[row.id] = row;
+      }
+
+      gradedAnswers = gradedAnswers.map((a) => {
+        const qid = parseInt(a.question_id, 10);
+        const row = Number.isInteger(qid) ? answerMap[qid] : null;
+        if (!row) {
+          return {
+            ...a,
+            is_correct: Boolean(a.is_correct),
+            correct: a.correct || null,
+          };
+        }
+        const selected = String(a.selected || '').trim().toUpperCase();
+        const correct = String(row.answer || '').trim().toUpperCase();
+        return {
+          question_id: qid,
+          question_text: a.question_text || row.question,
+          selected: a.selected || '',
+          correct,
+          is_correct: Boolean(correct) && selected === correct,
+          explanation: row.explanation || '',
+        };
+      });
+
+      finalScore = gradedAnswers.filter((a) => a.is_correct).length;
+      finalTotal = gradedAnswers.length || finalTotal;
+    }
+
     const attemptResult = await pool.query(
       `INSERT INTO quiz_attempts (user_id, subject_id, topic_id, topic_name, score, total, time_taken)
        VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-      [user_id, subject_id || null, resolvedTopicId, topic_name || null, score, total, time_taken || 0]
+      [user_id, subject_id || null, resolvedTopicId, topic_name || null, finalScore, finalTotal, time_taken || 0]
     );
 
     const attempt_id = attemptResult.rows[0].id;
 
-    if (answers && answers.length > 0) {
-      for (const answer of answers) {
+    if (gradedAnswers.length > 0) {
+      for (const answer of gradedAnswers) {
         const parsedId = parseInt(answer.question_id, 10);
         const questionId = Number.isInteger(parsedId) ? parsedId : null;
         await pool.query(
@@ -120,10 +167,77 @@ router.post('/attempt', authMiddleware, async (req, res) => {
     res.status(201).json({
       message: 'Quiz saved successfully!',
       attempt_id,
+      score: finalScore,
+      total: finalTotal,
     });
   } catch (err) {
     console.error('[saveAttempt]', err);
     res.status(500).json({ error: 'Could not save quiz attempt.' });
+  }
+});
+
+// Grade practice answers against the question bank without persisting an attempt.
+router.post('/grade', authMiddleware, async (req, res) => {
+  const { answers } = req.body;
+  if (!Array.isArray(answers) || answers.length === 0) {
+    return res.status(400).json({ error: 'answers array is required.' });
+  }
+
+  try {
+    const ids = answers
+      .map((a) => parseInt(a.question_id, 10))
+      .filter((id) => Number.isInteger(id));
+
+    if (ids.length === 0) {
+      return res.status(400).json({ error: 'Each answer needs a valid question_id.' });
+    }
+
+    const result = await pool.query(
+      `SELECT id, question, option_a, option_b, option_c, option_d, answer, explanation
+       FROM questions
+       WHERE id = ANY($1::int[]) AND deleted_at IS NULL`,
+      [ids]
+    );
+    const map = {};
+    for (const row of result.rows) map[row.id] = row;
+
+    const review = answers.map((a) => {
+      const qid = parseInt(a.question_id, 10);
+      const row = map[qid];
+      if (!row) {
+        return {
+          id: qid,
+          selected: a.selected || '',
+          isCorrect: false,
+          missing: true,
+        };
+      }
+      const selected = String(a.selected || '').trim().toUpperCase();
+      const correct = String(row.answer || '').trim().toUpperCase();
+      return {
+        id: row.id,
+        question: row.question,
+        options: {
+          A: row.option_a,
+          B: row.option_b,
+          C: row.option_c,
+          D: row.option_d,
+        },
+        answer: correct,
+        selected: a.selected || '',
+        explanation: row.explanation || '',
+        isCorrect: Boolean(correct) && selected === correct,
+      };
+    });
+
+    res.json({
+      score: review.filter((r) => r.isCorrect).length,
+      total: review.length,
+      review,
+    });
+  } catch (err) {
+    console.error('[gradeQuiz]', err);
+    res.status(500).json({ error: 'Could not grade quiz.' });
   }
 });
 

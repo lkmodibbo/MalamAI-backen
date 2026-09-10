@@ -9,6 +9,7 @@ const PORT = process.env.PORT || 5000;
 // Fail loudly at boot rather than with confusing 403s on the first request.
 function assertRequiredEnv() {
   const missing = [];
+  const weak = [];
 
   if (!process.env.JWT_SECRET) missing.push('JWT_SECRET');
   if (!process.env.DATABASE_URL && !process.env.DB_NAME) {
@@ -21,6 +22,17 @@ function assertRequiredEnv() {
       'Copy .env.example to .env and fill it in before starting the server.'
     );
     process.exit(1);
+  }
+
+  const secret = process.env.JWT_SECRET || '';
+  if (secret.length < 32 || /change-me|secret|password/i.test(secret)) {
+    weak.push('JWT_SECRET looks weak or placeholder');
+  }
+  if (process.env.NODE_ENV === 'production' && weak.length > 0) {
+    console.error(`[startup] ${weak.join('; ')}. Refusing to start in production.`);
+    process.exit(1);
+  } else if (weak.length > 0) {
+    console.warn(`[startup] ${weak.join('; ')}. Generate one with: openssl rand -hex 32`);
   }
 }
 

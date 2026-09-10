@@ -1,7 +1,7 @@
 const express = require('express');
-const jwt = require('jsonwebtoken');
 const router = express.Router();
 const pool = require('../config/database');
+const adminOnly = require('../middleware/adminOnly');
 const MAX_BULK_ITEMS = 200;
 
 function validateQuestionPayload(q) {
@@ -32,34 +32,6 @@ function parseSubjects(raw) {
     return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
-  }
-}
-
-async function adminOnly(req, res, next) {
-  const key = req.headers['x-admin-key'];
-  if (process.env.ADMIN_SECRET_KEY && key === process.env.ADMIN_SECRET_KEY) {
-    return next();
-  }
-
-  const authHeader = req.headers.authorization;
-  const token = authHeader && authHeader.split(' ')[1];
-  if (!token) {
-    return res.status(403).json({ error: 'Admin access only.' });
-  }
-
-  try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const result = await pool.query(
-      'SELECT id, email, is_admin FROM users WHERE id = $1',
-      [decoded.id]
-    );
-    if (!result.rows[0] || !result.rows[0].is_admin) {
-      return res.status(403).json({ error: 'Admin access only.' });
-    }
-    req.user = result.rows[0];
-    next();
-  } catch {
-    return res.status(403).json({ error: 'Admin access only.' });
   }
 }
 

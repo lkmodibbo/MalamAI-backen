@@ -13,7 +13,7 @@ router.get('/years/:subjectId', async (req, res) => {
          year,
          COUNT(id) AS question_count
        FROM past_questions
-       WHERE subject_id = $1
+       WHERE subject_id = $1 AND deleted_at IS NULL
        GROUP BY year
        ORDER BY year DESC`,
       [req.params.subjectId]
@@ -51,7 +51,7 @@ router.get('/questions', async (req, res) => {
          option_d,
          year
        FROM past_questions
-       WHERE subject_id = $1 AND year = $2
+       WHERE subject_id = $1 AND year = $2 AND deleted_at IS NULL
        ORDER BY id`,
       [subject_id, parseInt(year)]
     );
@@ -112,7 +112,7 @@ router.post('/submit', authMiddleware, async (req, res) => {
       `SELECT id, answer, explanation, question,
               option_a, option_b, option_c, option_d
        FROM past_questions
-       WHERE id = ANY($1::int[])`,
+       WHERE id = ANY($1::int[]) AND deleted_at IS NULL`,
       [questionIds]
     );
 

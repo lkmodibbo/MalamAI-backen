@@ -1041,3 +1041,162 @@ router.post('/notify-all', adminOnly, async (req, res) => {
 });
 
 module.exports = router;
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// AI STATS  — usage analytics for the admin console
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+// GET /api/admin/ai-stats
+// Returns: daily usage totals, top topics asked, users hitting the rate limit.
+router.get('/ai-stats', adminOnly, async (req, res) => {
+  try {
+    const [dailyRows, topicRows, limitRows, cacheRows] = await Promise.all([
+      // Total AI calls per day (last 14 days)
+      pool.query(`
+        SELECT usage_date,
+               SUM(chat_count)     AS chat_total,
+               SUM(generate_count) AS generate_total,
+               COUNT(DISTINCT user_id) AS active_users
+        FROM ai_usage
+        WHERE usage_date >= CURRENT_DATE - INTERVAL '14 days'
+        GROUP BY usage_date
+        ORDER BY usage_date DESC
+      `),
+
+      // Top 10 topics students ask about (from ai_messages, last 30 days)
+      pool.query(`
+        SELECT
+          LOWER(TRIM(
+            REGEXP_REPLACE(content, '(explain|what is|how does|define|describe|tell me about)', '', 'gi')
+          )) AS cleaned,
+          COUNT(*) AS ask_count
+        FROM ai_messages
+        WHERE role = 'user'
+          AND created_at > NOW() - INTERVAL '30 days'
+          AND LENGTH(content) < 120
+        GROUP BY cleaned
+        ORDER BY ask_count DESC
+        LIMIT 10
+      `),
+
+      // Users who hit the daily chat limit today
+      pool.query(`
+        SELECT u.name, u.email, au.chat_count, au.generate_count
+        FROM ai_usage au
+        JOIN users u ON u.id = au.user_id
+        WHERE au.usage_date = CURRENT_DATE
+          AND (au.chat_count >= $1 OR au.generate_count >= $2)
+        ORDER BY au.chat_count DESC
+        LIMIT 20
+      `, [
+        parseInt(process.env.AI_DAILY_CHAT_LIMIT     || '30', 10),
+        parseInt(process.env.AI_DAILY_GENERATE_LIMIT || '20', 10),
+      ]),
+
+      // Cache hit stats (total entries + entries created today)
+      pool.query(`
+        SELECT
+          COUNT(*)                                                        AS total_cached,
+          COUNT(*) FILTER (WHERE created_at >= CURRENT_DATE)             AS cached_today,
+          COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days') AS cached_this_week
+        FROM ai_cache
+      `),
+    ]);
+
+    return res.json({
+      daily:      dailyRows.rows,
+      topTopics:  topicRows.rows,
+      limitUsers: limitRows.rows,
+      cache:      cacheRows.rows[0] || {},
+    });
+  } catch (err) {
+    console.error('[GET /admin/ai-stats]', err.message);
+    return res.status(500).json({ error: 'Could not fetch AI stats.' });
+  }
+});
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// AI QUESTION REVIEW — approve / reject is_ai questions
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+// GET /api/admin/ai-questions?status=pending|approved|all&page=1&limit=20
+router.get('/ai-questions', adminOnly, async (req, res) => {
+  const page   = Math.max(parseInt(req.query.page  || '1',  10), 1);
+  const limit  = Math.min(parseInt(req.query.limit || '20', 10), 100);
+  const offset = (page - 1) * limit;
+  const status = req.query.status || 'pending'; // pending = not yet reviewed
+
+  let whereClause = `WHERE q.is_ai = TRUE AND q.deleted_at IS NULL`;
+  if (status === 'pending')  whereClause += ` AND q.is_ai_reviewed IS NOT TRUE`;
+  if (status === 'approved') whereClause += ` AND q.is_ai_reviewed = TRUE`;
+
+  try {
+    const [rows, countRow] = await Promise.all([
+      pool.query(`
+        SELECT q.id, q.question, q.option_a, q.option_b, q.option_c, q.option_d,
+               q.answer, q.explanation, q.is_ai_reviewed, q.created_at,
+               s.name AS subject_name, t.name AS topic_name
+        FROM questions q
+        LEFT JOIN subjects s ON s.id = q.subject_id
+        LEFT JOIN topics   t ON t.id = q.topic_id
+        ${whereClause}
+        ORDER BY q.created_at DESC
+        LIMIT $1 OFFSET $2
+      `, [limit, offset]),
+
+      pool.query(`
+        SELECT COUNT(*) AS total FROM questions q ${whereClause}
+      `),
+    ]);
+
+    return res.json({
+      questions: rows.rows,
+      total:     parseInt(countRow.rows[0]?.total || '0', 10),
+      page,
+      limit,
+    });
+  } catch (err) {
+    console.error('[GET /admin/ai-questions]', err.message);
+    return res.status(500).json({ error: 'Could not fetch AI questions.' });
+  }
+});
+
+// PATCH /api/admin/ai-questions/:id/approve — mark as reviewed and live
+router.patch('/ai-questions/:id/approve', adminOnly, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: 'Invalid id.' });
+
+  try {
+    const result = await pool.query(
+      `UPDATE questions SET is_ai_reviewed = TRUE WHERE id = $1 AND is_ai = TRUE RETURNING id`,
+      [id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'AI question not found.' });
+    await logAudit(req.user?.id, 'approve_ai_question', 'question', String(id));
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('[PATCH /admin/ai-questions/:id/approve]', err.message);
+    return res.status(500).json({ error: 'Could not approve question.' });
+  }
+});
+
+// PATCH /api/admin/ai-questions/:id/reject — soft-delete (remove from live pool)
+router.patch('/ai-questions/:id/reject', adminOnly, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: 'Invalid id.' });
+
+  try {
+    const result = await pool.query(
+      `UPDATE questions SET deleted_at = NOW() WHERE id = $1 AND is_ai = TRUE RETURNING id`,
+      [id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'AI question not found.' });
+    await logAudit(req.user?.id, 'reject_ai_question', 'question', String(id));
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('[PATCH /admin/ai-questions/:id/reject]', err.message);
+    return res.status(500).json({ error: 'Could not reject question.' });
+  }
+});
+
+module.exports = router;

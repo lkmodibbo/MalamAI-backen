@@ -163,6 +163,43 @@ const SCHEMA = [
      selected TEXT,
      is_correct BOOLEAN NOT NULL DEFAULT FALSE
    )`,
+
+  // Tracks per-user AI call counts per day to enforce rate limits
+  `CREATE TABLE IF NOT EXISTS ai_usage (
+     id SERIAL PRIMARY KEY,
+     user_id INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+     usage_date DATE NOT NULL DEFAULT CURRENT_DATE,
+     chat_count INTEGER NOT NULL DEFAULT 0,
+     generate_count INTEGER NOT NULL DEFAULT 0,
+     UNIQUE (user_id, usage_date)
+   )`,
+
+  // Caches AI responses for deterministic prompts (explanations, flashcards, etc.)
+  // so repeated requests for the same topic don't burn API quota.
+  `CREATE TABLE IF NOT EXISTS ai_cache (
+     id SERIAL PRIMARY KEY,
+     prompt_hash TEXT NOT NULL UNIQUE,
+     response TEXT NOT NULL,
+     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+   )`,
+
+  // Persists named chat conversations so students can resume across devices.
+  `CREATE TABLE IF NOT EXISTS ai_conversations (
+     id SERIAL PRIMARY KEY,
+     user_id INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+     title TEXT NOT NULL DEFAULT 'New Chat',
+     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+   )`,
+
+  // Individual messages within a conversation.
+  `CREATE TABLE IF NOT EXISTS ai_messages (
+     id SERIAL PRIMARY KEY,
+     conversation_id INTEGER NOT NULL REFERENCES ai_conversations (id) ON DELETE CASCADE,
+     role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+     content TEXT NOT NULL,
+     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+   )`,
 ];
 
 // Brings databases created before the schema above was complete up to date.
@@ -183,6 +220,7 @@ const BACKFILL = [
   `ALTER TABLE questions ADD COLUMN IF NOT EXISTS year INTEGER`,
   `ALTER TABLE questions ADD COLUMN IF NOT EXISTS is_ai BOOLEAN DEFAULT FALSE`,
   `ALTER TABLE questions ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`,
+  `ALTER TABLE questions ADD COLUMN IF NOT EXISTS is_ai_reviewed BOOLEAN DEFAULT FALSE`,
 
   `ALTER TABLE quiz_attempts ADD COLUMN IF NOT EXISTS topic_name TEXT`,
   `ALTER TABLE quiz_attempts ADD COLUMN IF NOT EXISTS time_taken INTEGER DEFAULT 0`,
@@ -232,6 +270,10 @@ const INDEXES = [
   `CREATE INDEX IF NOT EXISTS mock_exam_attempts_user_idx ON mock_exam_attempts (user_id, created_at DESC)`,
   `CREATE INDEX IF NOT EXISTS past_exam_attempts_user_idx ON past_exam_attempts (user_id, completed_at DESC)`,
   `CREATE INDEX IF NOT EXISTS past_exam_answers_attempt_idx ON past_exam_answers (attempt_id)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS ai_usage_user_date_idx ON ai_usage (user_id, usage_date)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS ai_cache_hash_idx ON ai_cache (prompt_hash)`,
+  `CREATE INDEX IF NOT EXISTS ai_conversations_user_idx ON ai_conversations (user_id, updated_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS ai_messages_conversation_idx ON ai_messages (conversation_id, created_at ASC)`,
 ];
 
 async function migrate() {

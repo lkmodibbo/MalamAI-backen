@@ -15,6 +15,7 @@ const bookmarkRoutes = require('./routes/bookmarks');
 const profileRoutes = require('./routes/profile');
 const notesRoutes = require('./routes/notes');
 const mockExamRoutes = require('./routes/mockExam');
+const aiRoutes       = require('./routes/ai');
 
 const pool = require('./config/database');
 let Sentry;
@@ -117,6 +118,7 @@ app.use('/api/bookmarks', bookmarkRoutes);
 app.use('/api/profile', profileRoutes);
 app.use('/api/notes', notesRoutes);
 app.use('/api/mock-exams', mockExamRoutes);
+app.use('/api/ai', aiRoutes);
 
 app.use((_req, res) => {
   res.status(404).json({ error: 'Route not found' });

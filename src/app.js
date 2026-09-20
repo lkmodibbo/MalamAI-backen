@@ -15,7 +15,7 @@ const bookmarkRoutes = require('./routes/bookmarks');
 const profileRoutes = require('./routes/profile');
 const notesRoutes = require('./routes/notes');
 const mockExamRoutes = require('./routes/mockExam');
-const aiRoutes       = require('./routes/ai');
+const aiRoutes = require('./routes/ai');
 
 const pool = require('./config/database');
 let Sentry;

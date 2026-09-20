@@ -38,7 +38,8 @@ router.get('/', authMiddleware, async (req, res) => {
   try {
     let query = `SELECT id, question, option_a, option_b, option_c, option_d, year, subject_id
                  FROM questions
-                 WHERE deleted_at IS NULL`;
+                 WHERE deleted_at IS NULL
+                   AND (COALESCE(is_ai, FALSE) = FALSE OR COALESCE(is_ai_reviewed, FALSE) = TRUE)`;
     const params = [];
     let n = 1;
 
@@ -101,8 +102,8 @@ router.post('/save-ai', adminOnly, async (req, res) => {
       const result = await pool.query(
         `INSERT INTO questions
            (subject_id, topic_id, question, option_a, option_b,
-            option_c, option_d, answer, explanation, is_ai)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, TRUE)
+            option_c, option_d, answer, explanation, is_ai, is_ai_reviewed)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, TRUE, FALSE)
          RETURNING id`,
         [
           subject_id,

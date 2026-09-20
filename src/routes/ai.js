@@ -36,6 +36,69 @@ function sha256(str) {
   return crypto.createHash('sha256').update(str).digest('hex');
 }
 
+/** Returns a Date object for the next local midnight (when the daily counter resets). */
+function nextMidnight() {
+  const d = new Date();
+  d.setDate(d.getDate() + 1);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+/** Seconds from now until the given Date. */
+function secondsUntil(date) {
+  return Math.max(0, Math.floor((date - Date.now()) / 1000));
+}
+
+/**
+ * Load the student's selected subjects, exam countdown, and recent weak topics
+ * from the DB. Used to personalise the AI system prompt.
+ * Returns a context object suitable for buildSystemMessage(). Non-fatal on failure.
+ */
+async function loadStudentContext(userId) {
+  try {
+    const profileRow = await pool.query(
+      `SELECT selected_subjects, exam_date FROM users WHERE id = $1`,
+      [userId]
+    );
+    if (profileRow.rows.length === 0) return {};
+
+    const { selected_subjects, exam_date } = profileRow.rows[0];
+    let subjects = [];
+    try { subjects = JSON.parse(selected_subjects || '[]'); } catch { subjects = []; }
+
+    let daysToExam = null;
+    if (exam_date) {
+      const examMs = new Date(exam_date).setHours(0, 0, 0, 0);
+      const nowMs  = new Date().setHours(0, 0, 0, 0);
+      daysToExam   = Math.ceil((examMs - nowMs) / 86400000);
+      if (daysToExam < 0) daysToExam = null;
+    }
+
+    const weakRows = await pool.query(
+      `SELECT qa.question_text AS topic, COUNT(*) AS wrong_count
+       FROM quiz_answers qa
+       JOIN quiz_attempts qat ON qa.attempt_id = qat.id
+       WHERE qat.user_id = $1
+         AND qa.is_correct = FALSE
+         AND qa.question_text IS NOT NULL
+         AND qat.created_at > NOW() - INTERVAL '30 days'
+       GROUP BY qa.question_text
+       ORDER BY wrong_count DESC
+       LIMIT 5`,
+      [userId]
+    );
+
+    return {
+      selectedSubjects: subjects,
+      daysToExam,
+      weakTopics: weakRows.rows.map((r) => ({ topic: r.topic })),
+    };
+  } catch (err) {
+    console.warn('[loadStudentContext] failed:', err.message);
+    return {};
+  }
+}
+
 /**
  * Increment the per-user daily counter for a given type ('chat' or 'generate').
  * Returns the new count.
@@ -151,10 +214,13 @@ router.post('/chat', authMiddleware, aiLimiter, async (req, res) => {
   // Check daily cap BEFORE calling the AI
   const usage = await getUsage(userId);
   if (usage.chat_count >= DAILY_CHAT_LIMIT) {
+    const resetAt = nextMidnight();
     return res.status(429).json({
       error: `You have reached your daily limit of ${DAILY_CHAT_LIMIT} messages. Come back tomorrow!`,
       limit: DAILY_CHAT_LIMIT,
-      used: usage.chat_count,
+      used:  usage.chat_count,
+      reset_at:            resetAt.toISOString(),
+      seconds_until_reset: secondsUntil(resetAt),
     });
   }
 
@@ -169,52 +235,7 @@ router.post('/chat', authMiddleware, aiLimiter, async (req, res) => {
   const conversationId = req.body.conversation_id ? parseInt(req.body.conversation_id, 10) : null;
 
   // Load student context to personalise the system prompt
-  let studentContext = {};
-  try {
-    const profileRow = await pool.query(
-      `SELECT selected_subjects, exam_date FROM users WHERE id = $1`,
-      [userId]
-    );
-    if (profileRow.rows.length > 0) {
-      const { selected_subjects, exam_date } = profileRow.rows[0];
-      // Parse selected subjects
-      let subjects = [];
-      try { subjects = JSON.parse(selected_subjects || '[]'); } catch { subjects = []; }
-
-      // Days to exam
-      let daysToExam = null;
-      if (exam_date) {
-        const examMs = new Date(exam_date).setHours(0, 0, 0, 0);
-        const nowMs  = new Date().setHours(0, 0, 0, 0);
-        daysToExam   = Math.ceil((examMs - nowMs) / 86400000);
-        if (daysToExam < 0) daysToExam = null; // exam already passed
-      }
-
-      // Weak topics: top 5 most-wrong topics from quiz answers in the last 30 days
-      const weakRows = await pool.query(
-        `SELECT qa.question_text AS topic, COUNT(*) AS wrong_count
-         FROM quiz_answers qa
-         JOIN quiz_attempts qat ON qa.attempt_id = qat.id
-         WHERE qat.user_id = $1
-           AND qa.is_correct = FALSE
-           AND qa.question_text IS NOT NULL
-           AND qat.created_at > NOW() - INTERVAL '30 days'
-         GROUP BY qa.question_text
-         ORDER BY wrong_count DESC
-         LIMIT 5`,
-        [userId]
-      );
-
-      studentContext = {
-        selectedSubjects: subjects,
-        daysToExam,
-        weakTopics: weakRows.rows.map((r) => ({ topic: r.topic })),
-      };
-    }
-  } catch (ctxErr) {
-    // Non-fatal — fall back to generic system prompt
-    console.warn('[ai/chat] context load failed:', ctxErr.message);
-  }
+  const studentContext = await loadStudentContext(userId);
 
   // Prepend the personalised system prompt
   const payload = [buildSystemMessage(studentContext), ...messages];
@@ -270,10 +291,13 @@ router.post('/generate', authMiddleware, aiLimiter, async (req, res) => {
 
   const usage = await getUsage(userId);
   if (usage.generate_count >= DAILY_GENERATE_LIMIT) {
+    const resetAt = nextMidnight();
     return res.status(429).json({
       error: `You have reached your daily generation limit of ${DAILY_GENERATE_LIMIT}. Come back tomorrow!`,
       limit: DAILY_GENERATE_LIMIT,
-      used: usage.generate_count,
+      used:  usage.generate_count,
+      reset_at:            resetAt.toISOString(),
+      seconds_until_reset: secondsUntil(resetAt),
     });
   }
 
@@ -304,7 +328,7 @@ router.post('/generate', authMiddleware, aiLimiter, async (req, res) => {
     }
   }
 
-  const payload = [buildSystemMessage(), { role: 'user', content: userPrompt }];
+  const payload = [buildSystemMessage(await loadStudentContext(userId)), { role: 'user', content: userPrompt }];
 
   try {
     const result = await chat(payload);
@@ -333,34 +357,24 @@ router.post('/generate', authMiddleware, aiLimiter, async (req, res) => {
 });
 
 // ─── GET /api/ai/usage ────────────────────────────────────────────────────────
-// Lets the frontend show the student how many messages they have left today,
-// plus the exact UTC timestamp when the counter resets (midnight local day).
 
 router.get('/usage', authMiddleware, async (req, res) => {
   try {
-    const usage = await getUsage(req.user.id);
-
-    // Reset happens at the start of the next calendar day (server local midnight).
-    // We express it as an ISO timestamp so the client can count down from it.
-    const now       = new Date();
-    const resetAt   = new Date(now);
-    resetAt.setDate(resetAt.getDate() + 1);
-    resetAt.setHours(0, 0, 0, 0);
-    const secondsUntilReset = Math.max(0, Math.floor((resetAt - now) / 1000));
-
+    const usage   = await getUsage(req.user.id);
+    const resetAt = nextMidnight();
     return res.json({
       chat: {
-        used:  usage.chat_count,
-        limit: DAILY_CHAT_LIMIT,
+        used:      usage.chat_count,
+        limit:     DAILY_CHAT_LIMIT,
         remaining: Math.max(0, DAILY_CHAT_LIMIT - usage.chat_count),
       },
       generate: {
-        used:  usage.generate_count,
-        limit: DAILY_GENERATE_LIMIT,
+        used:      usage.generate_count,
+        limit:     DAILY_GENERATE_LIMIT,
         remaining: Math.max(0, DAILY_GENERATE_LIMIT - usage.generate_count),
       },
-      reset_at:           resetAt.toISOString(),
-      seconds_until_reset: secondsUntilReset,
+      reset_at:            resetAt.toISOString(),
+      seconds_until_reset: secondsUntil(resetAt),
     });
   } catch (err) {
     console.error('[GET /ai/usage]', err.message);
